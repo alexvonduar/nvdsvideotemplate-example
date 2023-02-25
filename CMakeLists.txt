@@ -38,15 +38,27 @@ set(Tegra_LIB "/usr/lib/aarch64-linux-gnu/tegra")
 endif()
 
 # try find deepstream version
-set(DeepStream_VERSION_MAJOR 6)
-set(DeepStream_VERSION_MINOR 0)
-set(DeepStream_VERSION_PATCH 0)
+
 set(DeepStream_VERSION_STRING "")
-file(STRINGS ${DeepStream_DIR}/version DeepStream_VERSION_STRING REGEX "^Version:.*")
+
+file(STRINGS ${DeepStream_DIR}/version DeepStream_VERSION_STRING REGEX "^Version:[ \t\r\n]*[0-9]+\\.[0-9]+\\.[0-9]+[ \t\r\n]*")
+
+if (NOT DeepStream_VERSION_STRING)
+file(STRINGS ${DeepStream_DIR}/version DeepStream_VERSION_STRING REGEX "^Version:[ \t\r\n]*[0-9]+\\.[0-9]+[ \t\r\n]*")
+set(DeepStream_VERSION_STRING "${DeepStream_VERSION_STRING}.0")
+#message(STATUS "string: ${DeepStream_VERSION_STRING}")
+endif()
+
+if (NOT DeepStream_VERSION_STRING)
+message(WARNING "can note get DeepStream version from file ${DeepStream_DIR}/version")
+set(DeepStream_VERSION_STRING "Version: 6.0.0")
+endif()
+
 #message(STATUS "DeepStream_VERSION_STRING: ${DeepStream_VERSION_STRING}")
 string(REGEX REPLACE ".*([0-9]+)\\.[0-9]+\\.[0-9]+" "\\1" DeepStream_VERSION_MAJOR ${DeepStream_VERSION_STRING})
 string(REGEX REPLACE ".*[0-9]+\\.([0-9]+)\\.[0-9]+" "\\1" DeepStream_VERSION_MINOR ${DeepStream_VERSION_STRING})
 string(REGEX REPLACE ".*[0-9]+\\.[0-9]+\\.([0-9]+)" "\\1" DeepStream_VERSION_PATCH ${DeepStream_VERSION_STRING})
+
 #message(STATUS "DeepStream_VERSION: ${DeepStream_VERSION_MAJOR}" "${DeepStream_VERSION_MINOR}" "${DeepStream_VERSION_PATCH}")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDS_VERSION_MAJOR=${DeepStream_VERSION_MAJOR} -DDS_VERSION_MINOR=${DeepStream_VERSION_MINOR} -DDS_VERSION_PATCH=${DeepStream_VERSION_PATCH}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DDS_VERSION_MAJOR=${DeepStream_VERSION_MAJOR} -DDS_VERSION_MINOR=${DeepStream_VERSION_MINOR} -DDS_VERSION_PATCH=${DeepStream_VERSION_PATCH}")
