@@ -634,7 +634,9 @@ inline uint32_t getElementSize(nvinfer1::DataType t) noexcept
     case nvinfer1::DataType::kFLOAT: return 4;
     case nvinfer1::DataType::kHALF: return 2;
     case nvinfer1::DataType::kBOOL:
+#if ((NV_TENSORRT_MAJOR * 1000) + (NV_TENSORRT_MINOR * 100) + (NV_TENSORRT_PATCH * 10)) >= 8510
     case nvinfer1::DataType::kUINT8:
+#endif
     case nvinfer1::DataType::kINT8: return 1;
     }
     return 0;

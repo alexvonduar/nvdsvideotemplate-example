@@ -36,8 +36,10 @@
 #include "gst-nvquery.h"
 #include "gstnvdsmeta.h"
 #include "gst-nvevent.h"
+#if ((DS_VERSION_MAJOR * 100) + (DS_VERSION_MINOR * 10)) >= 610
 #include "nvdscustomusermeta.h"
 #include "nvdsdummyusermeta.h"
+#endif
 
 #include "nvdscustomlib_base.hpp"
 
@@ -80,7 +82,11 @@ public:
   SampleAlgorithm() {
     m_vectorProperty.clear();
     outputthread_stopped = false;
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+    trt_infer.initialize("float_int8.engine", {"Placeholder:0"}, {"transpose_1:0"});
+#else
     trt_infer.initialize("best_1x1x720x1280.engine", {"Placeholder:0"}, {"transpose_1:0"});
+#endif
   }
 
   /* Set Init Parameters */
@@ -597,6 +603,7 @@ SampleAlgorithm::update_meta (NvDsBatchMeta * batch_meta, uint32_t icnt)
   }
 }
 
+#if ((DS_VERSION_MAJOR * 100) + (DS_VERSION_MINOR * 10)) >= 610
 void *set_metadata_ptr()
 {
     guint i = 0;
@@ -716,6 +723,7 @@ void update_dummy_meta_data_on_buffer (NvDsBatchMeta *batch_meta)
         nvds_add_user_meta_to_frame(frame_meta, user_meta);
     }
 }
+#endif
 
 static inline void print_buf_surface(NvBufSurface *surf)
 {
@@ -828,6 +836,7 @@ void SampleAlgorithm::OutputThread(void)
                 if (batch_meta)
                     update_meta (batch_meta, icnt);
             }
+#if ((DS_VERSION_MAJOR * 100) + (DS_VERSION_MINOR * 10)) >= 610
             if (m_dummyMetaInsert && batch_meta)
             {
                 update_dummy_meta_data_on_buffer (batch_meta);
@@ -836,6 +845,7 @@ void SampleAlgorithm::OutputThread(void)
             {
                 fill_dummy_batch_meta_on_buffer (batch_meta);
             }
+#endif
 
             out_surf->numFilled = in_surf->numFilled;
             // Enable below code to copy the frame, else it will insert GREEN frame

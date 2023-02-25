@@ -69,7 +69,8 @@ def decodebin_child_added(child_proxy, Object, name, user_data):
         print("Setting ", name, " special properties\n")
         # 0 device 1 pinned 2 unified
         if is_aarch64():
-            Object.set_property("cudadec-memtype", 1)
+            #Object.set_property("cudadec-memtype", 1)
+            pass
         else:
             Object.set_property("cudadec-memtype", 0)
 
@@ -163,9 +164,9 @@ def main(args):
     if not nvvidconv_postmux:
         sys.stderr.write(" Unable to create nvvideoconvert \n")
     if is_aarch64():
-        nvvidconv_postmux.set_property("bl-output", 1)
-        # 0 default 1 pinned 2 device 3 unified
-        nvvidconv_postmux.set_property("nvbuf-memory-type", 1)
+        nvvidconv_postmux.set_property("bl-output", 0)
+        # 0 default 1 pinned 2 device 3 unified 4 surface array
+        nvvidconv_postmux.set_property("nvbuf-memory-type", 4)
     else:
         nvvidconv_postmux.set_property("bl-output", 0)
         # 0 default 1 pinned 2 device 3 unified
@@ -174,7 +175,7 @@ def main(args):
     # Create post mux caps filter
     cap_postmux = Gst.ElementFactory.make("capsfilter", "filter_postmux")
     if is_aarch64():
-        cap_postmux.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=true"))
+        cap_postmux.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
     else:
         cap_postmux.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
 
@@ -188,18 +189,26 @@ def main(args):
     pgie.set_property("customlib-props", "key2:value2")
     pgie.set_property("customlib-props", "scale-factor:2")
 
+    # Create a caps filter
+    caps_postpgie = Gst.ElementFactory.make("capsfilter", "filter_postpgie")
+    if is_aarch64():
+        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
+    else:
+        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
+
     print("Creating post pgie nvvidconv \n ")
     nvvidconv_postpgie = Gst.ElementFactory.make("nvvideoconvert", "convertor_postpgie")
     if not nvvidconv_postpgie:
         sys.stderr.write(" Unable to create post pgie nvvidconv \n")
 
+    '''
     # Create a caps filter
     caps_postpgie = Gst.ElementFactory.make("capsfilter", "filter_postpgie")
     if is_aarch64():
-        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=true"))
+        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA, block-linear=false"))
     else:
         caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
-
+    '''
 
     if number_sources > 1:
         print("Creating tiler {}\n ".format(number_sources))
@@ -223,9 +232,14 @@ def main(args):
     caps_postosd = Gst.ElementFactory.make("capsfilter", "filter_postosd")
     #caps_postosd.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12"))
     if is_aarch64():
-        caps_postosd.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=true"))
+        caps_postosd.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA, block-linear=false"))
     else:
         caps_postosd.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
+
+    if is_aarch64():
+        egltrans = Gst.ElementFactory.make("nvegltransform", "egltrans")
+        if not egltrans:
+            sys.stderr.write(" Unable to create egl transform")
 
     # Make the display sink
     sink = Gst.ElementFactory.make("nveglglessink", "nveglglessink")
@@ -261,22 +275,28 @@ def main(args):
     pipeline.add(nvosd)
     pipeline.add(nvvidconv_postosd)
     pipeline.add(caps_postosd)
+    if is_aarch64():
+        pipeline.add(egltrans)
     pipeline.add(sink)
 
     streammux.link(nvvidconv_postmux)
     nvvidconv_postmux.link(cap_postmux)
     cap_postmux.link(pgie)
-    pgie.link(nvvidconv_postpgie)
-    nvvidconv_postpgie.link(caps_postpgie)
+    pgie.link(caps_postpgie)
+    caps_postpgie.link(nvvidconv_postpgie)
     if number_sources > 1:
-        caps_postpgie.link(tiler)
+        nvvidconv_postpgie.link(tiler)
         tiler.link(nvosd)
     else:
-        caps_postpgie.link(nvosd)
+        nvvidconv_postpgie.link(nvosd)
 
     nvosd.link(nvvidconv_postosd)
     nvvidconv_postosd.link(caps_postosd)
-    caps_postosd.link(sink)
+    if is_aarch64():
+        caps_postosd.link(egltrans)
+        egltrans.link(sink)
+    else:
+        caps_postosd.link(sink)
 
     # create an event loop and feed gstreamer bus mesages to it
     loop = GLib.MainLoop()

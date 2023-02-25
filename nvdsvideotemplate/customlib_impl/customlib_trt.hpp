@@ -123,16 +123,19 @@ public:
 
         int batchSize = 0;
 
-        for (const auto &inputName: inputNames)
+        for (const auto &inputName : inputNames)
         {
             TRTBuffer buffer;
             const auto inputIndex = m_trtengine->getBindingIndex(inputName.c_str());
             buffer.dataType = m_trtengine->getBindingDataType(inputIndex);
             buffer.dims = m_trtengine->getBindingDimensions(inputIndex);
             buffer.batchSize = buffer.dims.nbDims < 3 ? 1 : buffer.dims.d[0];
-            if (batchSize) {
+            if (batchSize)
+            {
                 assert(buffer.batchSize == batchSize);
-            } else {
+            }
+            else
+            {
                 batchSize = buffer.batchSize;
             }
             sample::gLogInfo << "inputIndex: " << inputIndex << " type: " << dataTypeName(buffer.dataType) << " dims: " << dimsToString(buffer.dims) << std::endl;
@@ -154,7 +157,7 @@ public:
             m_trtInputBuffers.emplace_back(buffer);
         }
 
-        for (const auto &outputName: outputNames)
+        for (const auto &outputName : outputNames)
         {
             TRTBuffer buffer;
             const auto outputIndex = m_trtengine->getBindingIndex(outputName.c_str());
@@ -182,15 +185,18 @@ public:
             m_trtOutputBuffers.emplace_back(buffer);
         }
 
-        if (m_bindings) {
+        if (m_bindings)
+        {
             delete[] m_bindings;
         }
         m_numBindings = m_trtInputBuffers.size() + m_trtOutputBuffers.size();
-        m_bindings = new void*[m_numBindings];
-        for (size_t i = 0; i < m_trtInputBuffers.size(); i++) {
+        m_bindings = new void *[m_numBindings];
+        for (size_t i = 0; i < m_trtInputBuffers.size(); i++)
+        {
             m_bindings[i] = m_trtInputBuffers[i].buffer;
         }
-        for (size_t i = 0; i < m_trtOutputBuffers.size(); i++) {
+        for (size_t i = 0; i < m_trtOutputBuffers.size(); i++)
+        {
             m_bindings[i + m_trtInputBuffers.size()] = m_trtOutputBuffers[i].buffer;
         }
     }
@@ -198,9 +204,11 @@ public:
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
     void preprocessingImage(NvBufSurface *_surf)
     {
-        assert(_surf->numFilled == 1);
+        // assert(_surf->numFilled == 1);
+        const auto numFilled = _surf->numFilled;
+        const auto batchSize = _surf->batchSize;
         assert(_surf->memType == NVBUF_MEM_SURFACE_ARRAY);
-        NvBufSurface *surf = NULL;
+        NvBufSurface *surf = nullptr;
         bool input_pitch = _surf->surfaceList[0].layout == NVBUF_LAYOUT_PITCH;
         if (input_pitch)
         {
@@ -208,9 +216,9 @@ public:
         }
         else
         {
-            if (m_tmpsurf == NULL)
+            if (m_tmpsurf == nullptr)
             {
-                sample::gLogError << "try creat new buffer" << std::endl;
+                sample::gLogError << "try creat scratch buffer" << std::endl;
                 // FIXME: create temp surface
                 NvBufSurfaceCreateParams surfaceCreateParams;
                 surfaceCreateParams.layout = NVBUF_LAYOUT_PITCH;
@@ -223,7 +231,7 @@ public:
                 surfaceCreateParams.memType = _surf->memType;
 
                 m_tmpsurf = new NvBufSurface();
-                NvBufSurfaceCreate(&m_tmpsurf, 1, &surfaceCreateParams);
+                NvBufSurfaceCreate(&m_tmpsurf, batchSize, &surfaceCreateParams);
             }
             surf = m_tmpsurf;
             NvBufSurfTransformParams transform_params;
@@ -234,46 +242,47 @@ public:
             NvBufSurfTransform(_surf, surf, &transform_params);
             // NvBufSurfaceMemSet(surf, 0, 0, 128);
         }
-        int status = NvBufSurfaceMapEglImage(surf, 0);
+
+        // map all surfaces
+        int status = NvBufSurfaceMapEglImage(surf, -1);
         if (status != 0)
         {
             sample::gLogError << "Failed to map surface" << std::endl;
             return;
         }
-        CUresult egl_status;
-        CUeglFrame eglFrame;
-        CUgraphicsResource pResource = NULL;
 
-        EGLImageKHR eglImage = surf->surfaceList[0].mappedAddr.eglImage;
-
-        cudaFree(0);
-        egl_status = cuGraphicsEGLRegisterImage(&pResource, eglImage,
-                                                CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
-        if (egl_status != CUDA_SUCCESS)
+        for (int i = 0; i < surf->numFilled; i++)
         {
-            printf("cuGraphicsEGLRegisterImage failed: %d, cuda process stop\n",
-                   egl_status);
-            return;
-        }
+            CUresult egl_status;
+            CUeglFrame eglFrame;
+            CUgraphicsResource pResource = NULL;
 
-        egl_status = cuGraphicsResourceGetMappedEglFrame(&eglFrame, pResource, 0, 0);
-        if (egl_status != CUDA_SUCCESS)
-        {
-            printf("cuGraphicsSubResourceGetMappedArray failed\n");
-        }
+            EGLImageKHR eglImage = surf->surfaceList[i].mappedAddr.eglImage;
 
-        egl_status = cuCtxSynchronize();
-        if (egl_status != CUDA_SUCCESS)
-        {
-            printf("cuCtxSynchronize failed\n");
-        }
+            cudaFree(0);
+            egl_status = cuGraphicsEGLRegisterImage(&pResource, eglImage,
+                                                    CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+            if (egl_status != CUDA_SUCCESS)
+            {
+                printf("cuGraphicsEGLRegisterImage failed: %d, cuda process stop\n",
+                       egl_status);
+                return;
+            }
 
-        /// sample::gLogError << "egl frame type: " << eglFrame.frameType << std::endl;
-        if (eglFrame.frameType == CU_EGL_FRAME_TYPE_PITCH)
-        {
+            egl_status = cuGraphicsResourceGetMappedEglFrame(&eglFrame, pResource, 0, 0);
+            if (egl_status != CUDA_SUCCESS)
+            {
+                printf("cuGraphicsSubResourceGetMappedArray failed\n");
+            }
 
-            /// for (int i = 0; i < surf->numFilled; i++)
-            int i = 0;
+            egl_status = cuCtxSynchronize();
+            if (egl_status != CUDA_SUCCESS)
+            {
+                printf("cuCtxSynchronize failed\n");
+            }
+
+            /// sample::gLogError << "egl frame type: " << eglFrame.frameType << std::endl;
+            if (eglFrame.frameType == CU_EGL_FRAME_TYPE_PITCH)
             {
                 const auto w = surf->surfaceList[i].width;
                 const auto h = surf->surfaceList[i].height;
@@ -294,25 +303,28 @@ public:
                 // NppStreamContext nppStreamCtx;
                 // nppGetStreamContext(&nppStreamCtx);
                 auto pSrc = reinterpret_cast<Npp8u *>(eglFrame.frame.pPitch[0]);
-                auto pDst = reinterpret_cast<Npp32f *>(m_trtInputBuffer);
+                const auto numInputBuffer = m_trtInputBuffers[0].batchSize;
+                const auto bufferSizePerBatch = m_trtInputBuffers[0].size / numInputBuffer;
+                auto _pDst = reinterpret_cast<Npp8u *>(m_trtInputBuffers[0].buffer) + i * bufferSizePerBatch;
+                auto pDst = reinterpret_cast<Npp32f *>(_pDst);
                 auto npp_status = nppiScale_8u32f_C1R_Ctx(pSrc, plane_p, pDst, plane_p * sizeof(float), oSizeROI, 0.0, 1.0, m_nppcontext);
                 // cudaStreamSynchronize(m_nppStream);
             }
+
+            status = cuCtxSynchronize();
+            if (status != CUDA_SUCCESS)
+            {
+                printf("cuCtxSynchronize failed after memcpy\n");
+            }
+
+            status = cuGraphicsUnregisterResource(pResource);
+            if (status != CUDA_SUCCESS)
+            {
+                printf("cuGraphicsEGLUnRegisterResource failed: %d\n", status);
+            }
         }
 
-        status = cuCtxSynchronize();
-        if (status != CUDA_SUCCESS)
-        {
-            printf("cuCtxSynchronize failed after memcpy\n");
-        }
-
-        status = cuGraphicsUnregisterResource(pResource);
-        if (status != CUDA_SUCCESS)
-        {
-            printf("cuGraphicsEGLUnRegisterResource failed: %d\n", status);
-        }
-
-        NvBufSurfaceUnMapEglImage(surf, 0);
+        NvBufSurfaceUnMapEglImage(surf, -1);
 
         ////if (!input_pitch)
         ////{
@@ -322,11 +334,12 @@ public:
 #else
     void preprocessingImage(NvBufSurface *surf)
     {
-        //assert(surf->numFilled == 1);
-        // FIXME: check gpuid to support multi-gpu
+        // assert(surf->numFilled == 1);
+        //  FIXME: check gpuid to support multi-gpu
         assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
         auto unifiedMem = surf->memType == NVBUF_MEM_CUDA_UNIFIED;
-        if (unifiedMem) {
+        if (unifiedMem)
+        {
             int status = NvBufSurfaceMap(surf, -1, -1, NVBUF_MAP_READ_WRITE);
             if (status != 0)
             {
@@ -337,7 +350,7 @@ public:
 
         assert(surf->batchSize == m_trtInputBuffers[0].batchSize);
 
-        //iterate at batch size
+        // iterate at batch size
         const auto batchSize = surf->batchSize;
         const auto inputSizePerBatch = m_trtInputBuffers[0].size / batchSize;
         auto inputBuffer = reinterpret_cast<unsigned char *>(m_trtInputBuffers[0].buffer);
@@ -361,10 +374,13 @@ public:
             // nppSetStream(m_stream);
             // NppStreamContext nppStreamCtx;
             // nppGetStreamContext(&nppStreamCtx);
-            Npp8u * pSrc = nullptr;
-            if (unifiedMem) {
+            Npp8u *pSrc = nullptr;
+            if (unifiedMem)
+            {
                 pSrc = reinterpret_cast<Npp8u *>(surf->surfaceList[i].mappedAddr.addr[0]) + plane_offset;
-            } else {
+            }
+            else
+            {
                 pSrc = reinterpret_cast<Npp8u *>(surf->surfaceList[i].dataPtr) + plane_offset;
             }
             auto pDst = reinterpret_cast<Npp32f *>(inputBuffer + i * inputSizePerBatch);
@@ -372,7 +388,8 @@ public:
             // cudaStreamSynchronize(m_nppStream);
         }
 
-        if (unifiedMem) {
+        if (unifiedMem)
+        {
             NvBufSurfaceUnMap(surf, -1, -1);
         }
     }
@@ -382,46 +399,48 @@ public:
     void postprocessingImage(NvBufSurface *surf)
     {
         assert(surf->memType == NVBUF_MEM_SURFACE_ARRAY);
-        assert(surf->numFilled == 1);
-        int status = NvBufSurfaceMapEglImage(surf, 0);
+        // assert(surf->numFilled == 1);
+        const auto batchSize = surf->batchSize;
+        const auto numFilled = surf->numFilled;
+        // map all surfaces
+        int status = NvBufSurfaceMapEglImage(surf, -1);
         if (status != 0)
         {
             sample::gLogError << "Failed to map surface" << std::endl;
             return;
         }
-        CUresult egl_status;
-        CUeglFrame eglFrame;
-        CUgraphicsResource pResource = NULL;
 
-        EGLImageKHR eglImage = surf->surfaceList[0].mappedAddr.eglImage;
-
-        cudaFree(0);
-        egl_status = cuGraphicsEGLRegisterImage(&pResource, eglImage,
-                                                CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
-        if (egl_status != CUDA_SUCCESS)
+        for (int i = 0; i < surf->numFilled; i++)
         {
-            printf("cuGraphicsEGLRegisterImage failed: %d, cuda process stop\n",
-                   egl_status);
-            return;
-        }
+            CUresult egl_status;
+            CUeglFrame eglFrame;
+            CUgraphicsResource pResource = NULL;
 
-        egl_status = cuGraphicsResourceGetMappedEglFrame(&eglFrame, pResource, 0, 0);
-        if (egl_status != CUDA_SUCCESS)
-        {
-            printf("cuGraphicsSubResourceGetMappedArray failed\n");
-        }
+            EGLImageKHR eglImage = surf->surfaceList[i].mappedAddr.eglImage;
 
-        egl_status = cuCtxSynchronize();
-        if (egl_status != CUDA_SUCCESS)
-        {
-            printf("cuCtxSynchronize failed\n");
-        }
+            cudaFree(0);
+            egl_status = cuGraphicsEGLRegisterImage(&pResource, eglImage,
+                                                    CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+            if (egl_status != CUDA_SUCCESS)
+            {
+                printf("cuGraphicsEGLRegisterImage failed: %d, cuda process stop\n",
+                       egl_status);
+                return;
+            }
 
-        if (eglFrame.frameType == CU_EGL_FRAME_TYPE_PITCH)
-        {
-            // FIXME: check gpuid to support multi-gpu
-            // for (int i = 0; i < surf->numFilled; i++)
-            int i = 0;
+            egl_status = cuGraphicsResourceGetMappedEglFrame(&eglFrame, pResource, 0, 0);
+            if (egl_status != CUDA_SUCCESS)
+            {
+                printf("cuGraphicsSubResourceGetMappedArray failed\n");
+            }
+
+            egl_status = cuCtxSynchronize();
+            if (egl_status != CUDA_SUCCESS)
+            {
+                printf("cuCtxSynchronize failed\n");
+            }
+
+            if (eglFrame.frameType == CU_EGL_FRAME_TYPE_PITCH)
             {
                 const auto w = surf->surfaceList[i].width;
                 const auto h = surf->surfaceList[i].height;
@@ -449,8 +468,9 @@ public:
                 // nppGetStreamContext(&nppStreamCtx);
 
                 auto pDst = reinterpret_cast<Npp8u *>(eglFrame.frame.pPitch[0]);
-
-                auto pSrc = reinterpret_cast<Npp32f *>(m_trtOutputBuffer);
+                const auto outputBufferSizePerBatch = m_trtOutputBuffers[0].size / batchSize;
+                auto pSrc = reinterpret_cast<Npp32f *>(m_trtOutputBuffers[0].buffer) + i * outputBufferSizePerBatch;
+                //auto pSrc = reinterpret_cast<Npp32f *>(m_trtOutputBuffer);
                 // std::cout << "output plane pitch " << plane_p << std::endl;
                 auto npp_status = nppiScale_32f8u_C1R_Ctx(pSrc, plane_p * sizeof(float), pDst, plane_p, oSizeROI, 0.0, 1.0, m_nppcontext);
                 if (npp_status != NPP_NO_ERROR)
@@ -460,22 +480,22 @@ public:
                 // cudaStreamSynchronize(m_nppStream);
                 //  cudaStreamDestroy(stream);
             }
+
+            status = cuCtxSynchronize();
+            if (status != CUDA_SUCCESS)
+            {
+                printf("cuCtxSynchronize failed after memcpy\n");
+            }
+
+            status = cuGraphicsUnregisterResource(pResource);
+            if (status != CUDA_SUCCESS)
+            {
+                printf("cuGraphicsEGLUnRegisterResource failed: %d\n", status);
+            }
+            /// NvBufSurfaceMemSet(surf, 0, 0, 128);
         }
 
-        status = cuCtxSynchronize();
-        if (status != CUDA_SUCCESS)
-        {
-            printf("cuCtxSynchronize failed after memcpy\n");
-        }
-
-        status = cuGraphicsUnregisterResource(pResource);
-        if (status != CUDA_SUCCESS)
-        {
-            printf("cuGraphicsEGLUnRegisterResource failed: %d\n", status);
-        }
-        /// NvBufSurfaceMemSet(surf, 0, 0, 128);
-
-        NvBufSurfaceUnMapEglImage(surf, 0);
+        NvBufSurfaceUnMapEglImage(surf, -1);
     }
 #else
     void postprocessingImage(NvBufSurface *surf)
@@ -485,7 +505,8 @@ public:
         // FIXME: check gpuid to support multi-gpu
         assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
         auto unifiedMem = surf->memType == NVBUF_MEM_CUDA_UNIFIED;
-        if (unifiedMem) {
+        if (unifiedMem)
+        {
             int status = NvBufSurfaceMap(surf, -1, -1, NVBUF_MAP_READ_WRITE);
             if (status != 0)
             {
@@ -523,10 +544,13 @@ public:
             // nppSetStream(stream);
             // NppStreamContext nppStreamCtx;
             // nppGetStreamContext(&nppStreamCtx);
-            Npp8u * pDst = nullptr;
-            if (unifiedMem) {
+            Npp8u *pDst = nullptr;
+            if (unifiedMem)
+            {
                 pDst = reinterpret_cast<Npp8u *>(surf->surfaceList[i].mappedAddr.addr[0]) + plane_offset;
-            } else {
+            }
+            else
+            {
                 pDst = reinterpret_cast<Npp8u *>(surf->surfaceList[i].dataPtr) + plane_offset;
             }
             auto pSrc = reinterpret_cast<Npp32f *>(outputBuffer + outputSizePerBatch * i);
@@ -551,10 +575,10 @@ public:
     void trtInference(NvBufSurface *input, NvBufSurface *output)
     {
         preprocessingImage(input);
-        //void *bindings[] = {m_trtInputBuffer, m_trtOutputBuffer};
-        // auto context = m_trtengine->getExecutionContext();
-        // cudaStream_t stream;
-        // cudaStreamCreate(&stream);
+        // void *bindings[] = {m_trtInputBuffer, m_trtOutputBuffer};
+        //  auto context = m_trtengine->getExecutionContext();
+        //  cudaStream_t stream;
+        //  cudaStreamCreate(&stream);
         bool status = m_trtcontext->enqueueV2(m_bindings, m_stream, nullptr);
         cudaStreamSynchronize(m_stream);
         // cudaStreamDestroy(stream);
@@ -607,7 +631,8 @@ public:
 
     TRTInfer() : m_numBindings(0), m_bindings(nullptr)
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-    , m_tmpsurf(nullptr)
+                 ,
+                 m_tmpsurf(nullptr)
 #endif
 
     {
@@ -629,7 +654,7 @@ private:
     NvBufSurface *m_tmpsurf;
 #endif
     int m_numBindings;
-    void * * m_bindings;
+    void **m_bindings;
     static std::string const DEF_ENGINE_NAME;
     static std::string const INPUT_LAYER_NAME;
     static std::string const OUTPUT_LAYER_NAME;

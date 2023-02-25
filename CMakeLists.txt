@@ -28,8 +28,14 @@ pkg_check_modules(GSTREAMER_BASE REQUIRED gstreamer-base-1.0)
 pkg_check_modules(GSTREAMER_VIDEO REQUIRED gstreamer-video-1.0)
 
 # DeepStream
-set(DeepStream_INC "/opt/nvidia/deepstream/deepstream/sources/includes")
-set(DeepStream_LIB "/opt/nvidia/deepstream/deepstream/lib")
+set(DeepStream_DIR "/opt/nvidia/deepstream/deepstream/")
+set(DeepStream_SRC_DIR ${DeepStream_DIR}/sources)
+set(DeepStream_INC "${DeepStream_SRC_DIR}/includes")
+set(DeepStream_NVDSVIDEOTEMPLATE_INC "${DeepStream_SRC_DIR}/gst-plugins/gst-nvdsvideotemplate/includes")
+set(DeepStream_LIB "${DeepStream_DIR}/lib")
+if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
+set(Tegra_LIB "/usr/lib/aarch64-linux-gnu/tegra")
+endif()
 
 # opencv
 find_package(OpenCV REQUIRED)
@@ -44,8 +50,11 @@ if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DPLATFORM_TEGRA=1")
 endif()
 
-include_directories(${TRT_INC}  ${CUDA_INC} ${CUDNN_INC} ${OpenCV_INCLUDE_DIRS} ${GSTREAMER_INCLUDE_DIRS} ${DeepStream_INC})
+include_directories(${TRT_INC}  ${CUDA_INC} ${CUDNN_INC} ${OpenCV_INCLUDE_DIRS} ${GSTREAMER_INCLUDE_DIRS} ${DeepStream_INC} ${DeepStream_NVDSVIDEOTEMPLATE_INC})
 link_directories(${TRT_LIB}  ${CUDA_LIB} ${TRT_OSS_LIB})
+if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
+link_directories(${Tegra_LIB})
+endif()
 
 # customer lib
 set(CUSTOMER_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/nvdsvideotemplate)
@@ -54,14 +63,27 @@ set(CUSTOMER_LIB_SRCs   ${CUSTOMER_LIB_DIR}/customlib_impl/customlib_impl.cpp
 set(CUSTOMER_LIB_INC ${CUSTOMER_LIB_DIR}/includes ${CUSTOMER_LIB_DIR}/trt)
 set(DeepStream_LIBRARIES nvdsgst_helper nvdsgst_meta nvds_meta nvbufsurface nvbufsurftransform nvdsbufferpool)
 add_library(customlib_videoimpl SHARED ${CUSTOMER_LIB_SRCs})
+if(${CMAKE_VERSION} VERSION_LESS 3.13)
+if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
+set(CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS} "-L${DeepStream_LIB} -Wl,-rpath,${DeepStream_LIB}")
+else()
+set(CMAKE_SHARED_LINKER_FLAGS ${CMAKE_SHARED_LINKER_FLAGS} "-Wl,--no-undefined -Wl,-rpath,$(DeepStream_LIB)")
+endif()
+link_directories(${DeepStream_LIB})
+else()
+#if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
+#target_link_options(customlib_videoimpl PUBLIC -Wl,-rpath,$(DeepStream_LIB))
+#else()
 target_link_options(customlib_videoimpl PUBLIC -Wl,--no-undefined -Wl,-rpath,$(DeepStream_LIB))
-target_include_directories(customlib_videoimpl PUBLIC ${CUSTOMER_LIB_INC} ${OpenCV_INCLUDE_DIRS})
+#endif()
 target_link_directories(customlib_videoimpl PUBLIC ${DeepStream_LIB})
+endif()
+target_include_directories(customlib_videoimpl PUBLIC ${CUSTOMER_LIB_INC} ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(customlib_videoimpl   ${CUDA_LIBRARIES}
                                             cuda
                                             nvinfer
                                             nvonnxparser
-                                            nvcaffeparser
+                                            #nvcaffeparser
                                             ${CUDA_nppc_LIBRARY}
                                             ${CUDA_nppidei_LIBRARY}
                                             ${DeepStream_LIBRARIES}
