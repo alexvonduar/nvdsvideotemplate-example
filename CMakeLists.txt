@@ -37,6 +37,20 @@ if (CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "aarch64")
 set(Tegra_LIB "/usr/lib/aarch64-linux-gnu/tegra")
 endif()
 
+# try find deepstream version
+set(DeepStream_VERSION_MAJOR 6)
+set(DeepStream_VERSION_MINOR 0)
+set(DeepStream_VERSION_PATCH 0)
+set(DeepStream_VERSION_STRING "")
+file(STRINGS ${DeepStream_DIR}/version DeepStream_VERSION_STRING REGEX "^Version:.*")
+#message(STATUS "DeepStream_VERSION_STRING: ${DeepStream_VERSION_STRING}")
+string(REGEX REPLACE ".*([0-9]+)\\.[0-9]+\\.[0-9]+" "\\1" DeepStream_VERSION_MAJOR ${DeepStream_VERSION_STRING})
+string(REGEX REPLACE ".*[0-9]+\\.([0-9]+)\\.[0-9]+" "\\1" DeepStream_VERSION_MINOR ${DeepStream_VERSION_STRING})
+string(REGEX REPLACE ".*[0-9]+\\.[0-9]+\\.([0-9]+)" "\\1" DeepStream_VERSION_PATCH ${DeepStream_VERSION_STRING})
+#message(STATUS "DeepStream_VERSION: ${DeepStream_VERSION_MAJOR}" "${DeepStream_VERSION_MINOR}" "${DeepStream_VERSION_PATCH}")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DDS_VERSION_MAJOR=${DeepStream_VERSION_MAJOR} -DDS_VERSION_MINOR=${DeepStream_VERSION_MINOR} -DDS_VERSION_PATCH=${DeepStream_VERSION_PATCH}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DDS_VERSION_MAJOR=${DeepStream_VERSION_MAJOR} -DDS_VERSION_MINOR=${DeepStream_VERSION_MINOR} -DDS_VERSION_PATCH=${DeepStream_VERSION_PATCH}")
+
 # opencv
 find_package(OpenCV REQUIRED)
 
