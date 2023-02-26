@@ -82,11 +82,6 @@ public:
   SampleAlgorithm() {
     m_vectorProperty.clear();
     outputthread_stopped = false;
-#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
-    trt_infer.initialize("float_int8.engine", {"Placeholder:0"}, {"transpose_1:0"});
-#else
-    trt_infer.initialize("best_1x1x720x1280.engine", {"Placeholder:0"}, {"transpose_1:0"});
-#endif
   }
 
   /* Set Init Parameters */
@@ -241,6 +236,13 @@ bool SampleAlgorithm::SetInitParams(DSCustom_CreateParams *params)
       m_config_params.gpu_id = params->m_gpuId;
       m_config_params.cuda_stream = params->m_cudaStream;
   }
+
+  printf("pool config batch size %d\n", pool_config.batch_size);
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+    trt_infer.initialize("float_int8.engine", pool_config.batch_size, {"Placeholder:0"}, {"transpose_1:0"});
+#else
+    trt_infer.initialize("best_1x1x720x1280.engine", pool_config.batch_size, {"Placeholder:0"}, {"transpose_1:0"});
+#endif
 
   m_outputThread = new std::thread(&SampleAlgorithm::OutputThread, this);
 

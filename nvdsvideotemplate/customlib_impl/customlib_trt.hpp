@@ -25,6 +25,18 @@ typedef struct _TRTBuffer
     size_t size;
 } TRTBuffer;
 
+typedef struct _TRTJob
+{
+    int networkInputBatchSize;
+    cudaStream_t stream;
+    std::shared_ptr<nvinfer1::IExecutionContext> trtcontext;
+    NppStreamContext nppcontext;
+    std::vector<TRTBuffer> inputbuffers;
+    std::vector<TRTBuffer> outputbuffers;
+    int numBindings;
+    void **bindings;
+} TRTJob;
+
 static std::string dataTypeName(const nvinfer1::DataType &t)
 {
     switch (t)
@@ -61,12 +73,15 @@ static std::string dimsToString(const nvinfer1::Dims &dims)
 class TRTInfer
 {
 public:
-    void initialize(const std::string &trtModelFile, const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames)
+    void initialize(const std::string &trtModelFile, const int &inputBatch, const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames)
     {
+#if !defined(NDEBUG)
+        sample::gLogger.setReportableSeverity(nvinfer1::ILogger::Severity::kVERBOSE);
+#endif
         sample::gLogInfo << "Initializing TensorRT" << std::endl;
-        cudaStreamCreate(&m_stream);
-        nppSetStream(m_stream);
-        nppGetStreamContext(&m_nppcontext);
+        // cudaStreamCreate(&m_stream);
+        // nppSetStream(m_stream);
+        // nppGetStreamContext(&m_nppcontext);
 
         if (!m_trtruntime)
         {
@@ -110,94 +125,127 @@ public:
             return;
         }
 
-        if (!m_trtcontext)
-        {
-            m_trtcontext = std::unique_ptr<nvinfer1::IExecutionContext>{(m_trtengine->createExecutionContext())};
-        }
+        // if (!m_trtcontext)
+        //{
+        //     m_trtcontext = std::unique_ptr<nvinfer1::IExecutionContext>{(m_trtengine->createExecutionContext())};
+        // }
 
-        if (!m_trtcontext)
-        {
-            sample::gLogError << "Failed to create IExecutionContext" << std::endl;
-            return;
-        }
+        // if (!m_trtcontext)
+        //{
+        //     sample::gLogError << "Failed to create IExecutionContext" << std::endl;
+        //     return;
+        // }
 
-        int batchSize = 0;
+        int networkInputBatchSize = 0;
 
         for (const auto &inputName : inputNames)
         {
-            TRTBuffer buffer;
             const auto inputIndex = m_trtengine->getBindingIndex(inputName.c_str());
-            buffer.dataType = m_trtengine->getBindingDataType(inputIndex);
-            buffer.dims = m_trtengine->getBindingDimensions(inputIndex);
-            buffer.batchSize = buffer.dims.nbDims < 3 ? 1 : buffer.dims.d[0];
-            if (batchSize)
+            const auto dims = m_trtengine->getBindingDimensions(inputIndex);
+            if (networkInputBatchSize == 0)
             {
-                assert(buffer.batchSize == batchSize);
+                networkInputBatchSize = dims.nbDims < 3 ? 1 : dims.d[0];
             }
             else
             {
-                batchSize = buffer.batchSize;
+                assert(networkInputBatchSize == (dims.nbDims < 3 ? 1 : dims.d[0]));
             }
-            sample::gLogInfo << "inputIndex: " << inputIndex << " type: " << dataTypeName(buffer.dataType) << " dims: " << dimsToString(buffer.dims) << std::endl;
-            buffer.size = samplesCommon::volume(buffer.dims) * samplesCommon::getElementSize(buffer.dataType);
-            sample::gLogInfo << "size: " << buffer.size << std::endl;
-            buffer.buffer = nullptr;
-#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-            buffer.memType = NVBUF_MEM_CUDA_DEVICE;
-            cudaMalloc(&buffer.buffer, buffer.size);
-#else
-            buffer.memType = NVBUF_MEM_CUDA_UNIFIED;
-            cudaMallocManaged(&buffer.buffer, buffer.size);
-#endif
-            if (buffer.buffer == nullptr)
-            {
-                sample::gLogError << "Failed to allocate input buffer" << std::endl;
-                // return;
-            }
-            m_trtInputBuffers.emplace_back(buffer);
         }
 
-        for (const auto &outputName : outputNames)
-        {
-            TRTBuffer buffer;
-            const auto outputIndex = m_trtengine->getBindingIndex(outputName.c_str());
-            buffer.dataType = m_trtengine->getBindingDataType(outputIndex);
-            buffer.dims = m_trtengine->getBindingDimensions(outputIndex);
-            buffer.batchSize = buffer.dims.nbDims < 3 ? 1 : buffer.dims.d[0];
-            assert(buffer.batchSize == batchSize);
-            sample::gLogInfo << "outputIndex: " << outputIndex << " type: " << dataTypeName(buffer.dataType) << " dims: " << dimsToString(buffer.dims) << std::endl;
-            buffer.size = samplesCommon::volume(buffer.dims) * samplesCommon::getElementSize(buffer.dataType);
-            sample::gLogInfo << "size: " << buffer.size << std::endl;
-            buffer.buffer = nullptr;
-#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-            buffer.memType = NVBUF_MEM_CUDA_DEVICE;
-            cudaMalloc(&buffer.buffer, buffer.size);
-#else
-            buffer.memType = NVBUF_MEM_CUDA_UNIFIED;
-            cudaMallocManaged(&buffer.buffer, buffer.size);
-#endif
-            // std::cout <<"m_trtOutputBuffer: " << m_trtOutputBuffer << std::endl;
-            if (buffer.buffer == nullptr)
-            {
-                sample::gLogError << "Failed to allocate output buffer" << std::endl;
-                // return;
-            }
-            m_trtOutputBuffers.emplace_back(buffer);
-        }
+        int numJobs = (inputBatch + networkInputBatchSize - 1) / networkInputBatchSize;
 
-        if (m_bindings)
+        sample::gLogInfo << "input buffer batch size: " << inputBatch << " network input batch size: " << networkInputBatchSize << " numJobs: " << numJobs << std::endl;
+        for (int i = 0; i < numJobs; i++)
         {
-            delete[] m_bindings;
-        }
-        m_numBindings = m_trtInputBuffers.size() + m_trtOutputBuffers.size();
-        m_bindings = new void *[m_numBindings];
-        for (size_t i = 0; i < m_trtInputBuffers.size(); i++)
-        {
-            m_bindings[i] = m_trtInputBuffers[i].buffer;
-        }
-        for (size_t i = 0; i < m_trtOutputBuffers.size(); i++)
-        {
-            m_bindings[i + m_trtInputBuffers.size()] = m_trtOutputBuffers[i].buffer;
+            TRTJob job;
+            memset(&job, 0, sizeof(TRTJob));
+            job.networkInputBatchSize = networkInputBatchSize;
+            cudaStreamCreate(&job.stream);
+            job.trtcontext = std::shared_ptr<nvinfer1::IExecutionContext>{(m_trtengine->createExecutionContext())};
+
+            if (job.trtcontext == nullptr)
+            {
+                sample::gLogError << "Failed to create IExecutionContext" << std::endl;
+                return;
+            }
+            // job.nppcontext = m_nppcontext;
+            // job.numBindings = m_trtengine->getNbBindings();
+            // job.bindings = new void*[job.numBindings];
+            // for (int j = 0; j < job.numBindings; j++) {
+            //     job.bindings[j] = nullptr;
+            // }
+            for (const auto &inputName : inputNames)
+            {
+                TRTBuffer buffer;
+                const auto inputIndex = m_trtengine->getBindingIndex(inputName.c_str());
+                buffer.dataType = m_trtengine->getBindingDataType(inputIndex);
+                buffer.dims = m_trtengine->getBindingDimensions(inputIndex);
+                buffer.batchSize = buffer.dims.nbDims < 3 ? 1 : buffer.dims.d[0];
+                sample::gLogInfo << "Job: " << i << " input: " << inputIndex << " type: " << dataTypeName(buffer.dataType) << " dims: " << dimsToString(buffer.dims) << std::endl;
+                buffer.size = samplesCommon::volume(buffer.dims) * samplesCommon::getElementSize(buffer.dataType);
+                // sample::gLogInfo << "buffer size: " << buffer.size << std::endl;
+                buffer.buffer = nullptr;
+#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+                buffer.memType = NVBUF_MEM_CUDA_DEVICE;
+                cudaMalloc(&buffer.buffer, buffer.size);
+#else
+                buffer.memType = NVBUF_MEM_CUDA_UNIFIED;
+                cudaMallocManaged(&buffer.buffer, buffer.size);
+#endif
+                if (buffer.buffer == nullptr)
+                {
+                    sample::gLogError << "Failed to allocate input buffer" << std::endl;
+                    // return;
+                }
+                sample::gLogInfo << "Job: " << i << " input: " << inputIndex << " buffer: " << buffer.buffer << " size " << buffer.size << std::endl;
+                job.inputbuffers.emplace_back(buffer);
+            }
+
+            for (const auto &outputName : outputNames)
+            {
+                TRTBuffer buffer;
+                const auto outputIndex = m_trtengine->getBindingIndex(outputName.c_str());
+                buffer.dataType = m_trtengine->getBindingDataType(outputIndex);
+                buffer.dims = m_trtengine->getBindingDimensions(outputIndex);
+                buffer.batchSize = buffer.dims.nbDims < 3 ? 1 : buffer.dims.d[0];
+                // assert(buffer.batchSize == batchSize);
+                sample::gLogInfo << "Job: " << i << " output: " << outputIndex << " type: " << dataTypeName(buffer.dataType) << " dims: " << dimsToString(buffer.dims) << std::endl;
+                buffer.size = samplesCommon::volume(buffer.dims) * samplesCommon::getElementSize(buffer.dataType);
+                // sample::gLogInfo << "buffer size: " << buffer.size << std::endl;
+                buffer.buffer = nullptr;
+#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+                buffer.memType = NVBUF_MEM_CUDA_DEVICE;
+                cudaMalloc(&buffer.buffer, buffer.size);
+#else
+                buffer.memType = NVBUF_MEM_CUDA_UNIFIED;
+                cudaMallocManaged(&buffer.buffer, buffer.size);
+#endif
+                // std::cout <<"m_trtOutputBuffer: " << m_trtOutputBuffer << std::endl;
+                if (buffer.buffer == nullptr)
+                {
+                    sample::gLogError << "Failed to allocate output buffer" << std::endl;
+                    // return;
+                }
+                sample::gLogInfo << "Job: " << i << " output: " << outputIndex << " buffer: " << buffer.buffer << " size " << buffer.size << std::endl;
+                job.outputbuffers.emplace_back(buffer);
+            }
+
+            if (job.bindings != nullptr)
+            {
+                delete[] job.bindings;
+            }
+            job.numBindings = job.inputbuffers.size() + job.outputbuffers.size();
+            job.bindings = new void *[job.numBindings];
+            memset(job.bindings, 0, sizeof(void *) * job.numBindings);
+            for (size_t j = 0; j < job.inputbuffers.size(); j++)
+            {
+                job.bindings[j] = job.inputbuffers[j].buffer;
+            }
+            for (size_t j = 0; j < job.outputbuffers.size(); j++)
+            {
+                job.bindings[j + job.inputbuffers.size()] = job.outputbuffers[j].buffer;
+            }
+            m_trtJobs.emplace_back(job);
         }
     }
 
@@ -325,18 +373,13 @@ public:
         }
 
         NvBufSurfaceUnMapEglImage(surf, -1);
-
-        ////if (!input_pitch)
-        ////{
-        ////  NvBufSurfaceDestroy(surf);
-        ////}
     }
 #else
     void preprocessingImage(NvBufSurface *surf)
     {
         // assert(surf->numFilled == 1);
         //  FIXME: check gpuid to support multi-gpu
-        assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
+        // assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
         auto unifiedMem = surf->memType == NVBUF_MEM_CUDA_UNIFIED;
         if (unifiedMem)
         {
@@ -348,14 +391,19 @@ public:
             }
         }
 
-        assert(surf->batchSize == m_trtInputBuffers[0].batchSize);
+        // assert(surf->batchSize == m_trtInputBuffers[0].batchSize);
 
         // iterate at batch size
-        const auto batchSize = surf->batchSize;
-        const auto inputSizePerBatch = m_trtInputBuffers[0].size / batchSize;
-        auto inputBuffer = reinterpret_cast<unsigned char *>(m_trtInputBuffers[0].buffer);
+        const auto numJobs = m_trtJobs.size();
+        const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
+        NppStatus npp_status;
         for (int i = 0; i < surf->numFilled; i++)
         {
+            const auto jobIndex = i / networkInputBatchSize;
+            const auto batchIndex = i % networkInputBatchSize;
+            const auto networkInputBatchSize = m_trtJobs[jobIndex].networkInputBatchSize;
+            const auto inputSizePerBatch = m_trtJobs[jobIndex].inputbuffers[0].size / networkInputBatchSize;
+            auto inputBuffer = reinterpret_cast<unsigned char *>(m_trtJobs[jobIndex].inputbuffers[0].buffer) + batchIndex * inputSizePerBatch;
             const auto w = surf->surfaceList[i].width;
             const auto h = surf->surfaceList[i].height;
             const auto p = surf->surfaceList[i].pitch;
@@ -374,6 +422,19 @@ public:
             // nppSetStream(m_stream);
             // NppStreamContext nppStreamCtx;
             // nppGetStreamContext(&nppStreamCtx);
+            if (m_trtJobs[jobIndex].nppcontext.hStream == nullptr)
+            {
+                npp_status = nppSetStream(m_trtJobs[jobIndex].stream);
+                if (npp_status != NPP_SUCCESS)
+                {
+                    sample::gLogError << "set npp stream error: " << npp_status << std::endl;
+                }
+                npp_status = nppGetStreamContext(&m_trtJobs[jobIndex].nppcontext);
+                if (npp_status != NPP_SUCCESS)
+                {
+                    sample::gLogError << "get npp stream context error: " << npp_status << std::endl;
+                }
+            }
             Npp8u *pSrc = nullptr;
             if (unifiedMem)
             {
@@ -383,9 +444,21 @@ public:
             {
                 pSrc = reinterpret_cast<Npp8u *>(surf->surfaceList[i].dataPtr) + plane_offset;
             }
-            auto pDst = reinterpret_cast<Npp32f *>(inputBuffer + i * inputSizePerBatch);
-            auto npp_status = nppiScale_8u32f_C1R_Ctx(pSrc, plane_p, pDst, plane_p * sizeof(float), oSizeROI, 0.0, 255.0, m_nppcontext);
+            auto pDst = reinterpret_cast<Npp32f *>(inputBuffer);
+            sample::gLogInfo << "preprocess: " << reinterpret_cast<void *>(pSrc) << " " << reinterpret_cast<void *>(pDst) << std::endl;
+            if (m_trtJobs[jobIndex].nppcontext.hStream == nullptr)
+            {
+                npp_status = nppiScale_8u32f_C1R(pSrc, plane_p, pDst, plane_p * sizeof(float), oSizeROI, 0.0, 1.0);
+            }
+            else
+            {
+                npp_status = nppiScale_8u32f_C1R_Ctx(pSrc, plane_p, pDst, plane_p * sizeof(float), oSizeROI, 0.0, 1.0, m_trtJobs[jobIndex].nppcontext);
+            }
             // cudaStreamSynchronize(m_nppStream);
+            if (npp_status != NPP_SUCCESS)
+            {
+                sample::gLogError << "preprocessing npp error: " << npp_status << std::endl;
+            }
         }
 
         if (unifiedMem)
@@ -470,8 +543,8 @@ public:
                 auto pDst = reinterpret_cast<Npp8u *>(eglFrame.frame.pPitch[0]);
                 const auto outputBufferSizePerBatch = m_trtOutputBuffers[0].size / batchSize;
                 auto pSrc = reinterpret_cast<Npp32f *>(m_trtOutputBuffers[0].buffer) + i * outputBufferSizePerBatch;
-                //auto pSrc = reinterpret_cast<Npp32f *>(m_trtOutputBuffer);
-                // std::cout << "output plane pitch " << plane_p << std::endl;
+                // auto pSrc = reinterpret_cast<Npp32f *>(m_trtOutputBuffer);
+                //  std::cout << "output plane pitch " << plane_p << std::endl;
                 auto npp_status = nppiScale_32f8u_C1R_Ctx(pSrc, plane_p * sizeof(float), pDst, plane_p, oSizeROI, 0.0, 1.0, m_nppcontext);
                 if (npp_status != NPP_NO_ERROR)
                 {
@@ -500,10 +573,10 @@ public:
 #else
     void postprocessingImage(NvBufSurface *surf)
     {
-        assert(surf->batchSize == m_trtOutputBuffers[0].batchSize);
+        // assert(surf->batchSize == m_trtOutputBuffers[0].batchSize);
 
         // FIXME: check gpuid to support multi-gpu
-        assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
+        // assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
         auto unifiedMem = surf->memType == NVBUF_MEM_CUDA_UNIFIED;
         if (unifiedMem)
         {
@@ -515,11 +588,20 @@ public:
             }
         }
 
-        const auto batchSize = surf->batchSize;
-        const auto outputSizePerBatch = m_trtOutputBuffers[0].size / batchSize;
-        auto outputBuffer = reinterpret_cast<unsigned char *>(m_trtOutputBuffers[0].buffer);
+        const auto numJobs = m_trtJobs.size();
+        const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
+        // const auto batchSize = surf->batchSize;
+        // const auto outputSizePerBatch = m_trtOutputBuffers[0].size / batchSize;
+        // auto outputBuffer = reinterpret_cast<unsigned char *>(m_trtOutputBuffers[0].buffer);
+        NppStatus npp_status;
         for (int i = 0; i < surf->numFilled; i++)
         {
+            const auto jobIndex = i / networkInputBatchSize;
+            const auto batchIndex = i % networkInputBatchSize;
+            const auto networkInputBatchSize = m_trtJobs[jobIndex].networkInputBatchSize;
+            const auto outputSizePerBatch = m_trtJobs[jobIndex].outputbuffers[0].size / networkInputBatchSize;
+            auto outputBuffer = reinterpret_cast<unsigned char *>(m_trtJobs[jobIndex].outputbuffers[0].buffer) + batchIndex * outputSizePerBatch;
+
             const auto w = surf->surfaceList[i].width;
             const auto h = surf->surfaceList[i].height;
             const auto p = surf->surfaceList[i].pitch;
@@ -553,13 +635,22 @@ public:
             {
                 pDst = reinterpret_cast<Npp8u *>(surf->surfaceList[i].dataPtr) + plane_offset;
             }
-            auto pSrc = reinterpret_cast<Npp32f *>(outputBuffer + outputSizePerBatch * i);
+            auto pSrc = reinterpret_cast<Npp32f *>(outputBuffer);
             // std::cout << "output buffer: " << m_trtOutputBuffer << std::endl;
-            std::cout << "output plane pitch " << plane_p << std::endl;
-            auto npp_status = nppiScale_32f8u_C1R_Ctx(pSrc, plane_p * sizeof(float), pDst, plane_p, oSizeROI, 0.0, 255.0, m_nppcontext);
+            // printf("output src %p dst %p\n", pSrc, pDst);
+            sample::gLogInfo << "output src " << reinterpret_cast<void *>(pSrc) << " dst " << reinterpret_cast<void *>(pDst) << std::endl;
+            sample::gLogInfo << "output plane pitch " << plane_p << std::endl;
+            if (m_trtJobs[jobIndex].nppcontext.hStream == nullptr)
+            {
+                npp_status = nppiScale_32f8u_C1R(pSrc, plane_p * sizeof(float), pDst, plane_p, oSizeROI, 0.0, 1.0);
+            }
+            else
+            {
+                npp_status = nppiScale_32f8u_C1R_Ctx(pSrc, plane_p * sizeof(float), pDst, plane_p, oSizeROI, 0.0, 1.0, m_trtJobs[jobIndex].nppcontext);
+            }
             if (npp_status != NPP_NO_ERROR)
             {
-                std::cout << "post processing npp error " << npp_status << std::endl;
+                sample::gLogError << "post processing npp error " << npp_status << std::endl;
             }
             // cudaStreamSynchronize(m_nppStream);
             // cudaStreamDestroy(stream);
@@ -572,6 +663,18 @@ public:
     }
 #endif
 
+    static inline bool CHECK_(int e, int iLine, const char *szFile)
+    {
+        if (e != cudaSuccess)
+        {
+            std::cout << "CUDA runtime error " << e << " at line " << iLine << " in file " << szFile;
+            exit(-1);
+            return false;
+        }
+        return true;
+    }
+#define CHECK_CUDA(call) CHECK_(call, __LINE__, __FILE__)
+
     void trtInference(NvBufSurface *input, NvBufSurface *output)
     {
         preprocessingImage(input);
@@ -579,47 +682,47 @@ public:
         //  auto context = m_trtengine->getExecutionContext();
         //  cudaStream_t stream;
         //  cudaStreamCreate(&stream);
-        bool status = m_trtcontext->enqueueV2(m_bindings, m_stream, nullptr);
-        cudaStreamSynchronize(m_stream);
-        // cudaStreamDestroy(stream);
-        if (!status)
+        for (int i = 0; i < m_trtJobs.size(); ++i)
         {
-            sample::gLogError << "Failed to enqueue infer" << std::endl;
-            //    //assert(0);
-            ///    //return;
+            bool status = m_trtJobs[i].trtcontext->enqueueV2(m_trtJobs[i].bindings, m_trtJobs[i].stream, nullptr);
+            // cudaStreamSynchronize(m_stream);
+            //  cudaStreamDestroy(stream);
+            if (!status)
+            {
+                sample::gLogError << "Failed to do " << i << " infer job" << std::endl;
+            }
         }
         postprocessingImage(output);
+
+        for (const auto &j : m_trtJobs)
+        {
+            CHECK_CUDA(cudaStreamSynchronize(j.stream));
+        }
     }
 
     ~TRTInfer()
     {
-        if (m_bindings)
+        for (auto &j : m_trtJobs)
         {
-            delete[] m_bindings;
-            m_bindings = nullptr;
+            if (j.bindings)
+            {
+                delete[] j.bindings;
+                j.bindings = nullptr;
+            }
+            // delete j.trtcontext;
+            cudaStreamDestroy(j.stream);
+            j.stream = nullptr;
+            for (auto &b : j.inputbuffers)
+            {
+                cudaFree(b.buffer);
+                b.buffer = nullptr;
+            }
+            for (auto &b : j.outputbuffers)
+            {
+                cudaFree(b.buffer);
+                b.buffer = nullptr;
+            }
         }
-
-        for (auto &b : m_trtInputBuffers)
-        {
-            cudaFree(b.buffer);
-            b.buffer = nullptr;
-        }
-
-        for (auto &b : m_trtOutputBuffers)
-        {
-            cudaFree(b.buffer);
-            b.buffer = nullptr;
-        }
-
-        if (m_stream)
-        {
-            cudaStreamDestroy(m_stream);
-            m_stream = NULL;
-        }
-        ////if (m_nppStream) {
-        ////  cudaStreamDestroy(m_nppStream);
-        ////  m_nppStream = NULL;
-        ////}
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
         if (m_tmpsurf)
         {
@@ -629,32 +732,32 @@ public:
 #endif
     }
 
-    TRTInfer() : m_numBindings(0), m_bindings(nullptr)
+    TRTInfer()
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-                 ,
-                 m_tmpsurf(nullptr)
+        : m_tmpsurf(nullptr)
 #endif
 
     {
     }
 
 private:
-    cudaStream_t m_stream;
+    // cudaStream_t m_stream;
     std::unique_ptr<nvinfer1::IRuntime> m_trtruntime;
     std::shared_ptr<nvinfer1::ICudaEngine> m_trtengine;
-    std::unique_ptr<nvinfer1::IExecutionContext> m_trtcontext;
+    // std::unique_ptr<nvinfer1::IExecutionContext> m_trtcontext;
     std::string m_trtModelFile;
-    std::vector<TRTBuffer> m_trtInputBuffers;
-    // char *m_trtInputBuffer;
-    std::vector<TRTBuffer> m_trtOutputBuffers;
-    // char *m_trtOutputBuffer;
-    //  cudaStream_t m_nppStream;
-    NppStreamContext m_nppcontext;
+    std::vector<TRTJob> m_trtJobs;
+    // std::vector<TRTBuffer> m_trtInputBuffers;
+    //  char *m_trtInputBuffer;
+    // std::vector<TRTBuffer> m_trtOutputBuffers;
+    //  char *m_trtOutputBuffer;
+    //   cudaStream_t m_nppStream;
+    // NppStreamContext m_nppcontext;
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
     NvBufSurface *m_tmpsurf;
 #endif
-    int m_numBindings;
-    void **m_bindings;
+    // int m_numBindings;
+    // void **m_bindings;
     static std::string const DEF_ENGINE_NAME;
     static std::string const INPUT_LAYER_NAME;
     static std::string const OUTPUT_LAYER_NAME;
