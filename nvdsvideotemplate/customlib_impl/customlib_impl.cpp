@@ -239,9 +239,9 @@ bool SampleAlgorithm::SetInitParams(DSCustom_CreateParams *params)
 
   printf("pool config batch size %d\n", pool_config.batch_size);
 #if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
-    trt_infer.initialize("float_int8.engine", pool_config.batch_size, {"Placeholder:0"}, {"transpose_1:0"});
+    trt_infer.initialize("agx_int8.engine", pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"input1","input2"}, {"output"});
 #else
-    trt_infer.initialize("best_1x1x720x1280.engine", pool_config.batch_size, {"Placeholder:0"}, {"transpose_1:0"});
+    trt_infer.initialize("a2000.engine", pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"input1","input2"}, {"output"});
 #endif
 
   m_outputThread = new std::thread(&SampleAlgorithm::OutputThread, this);
@@ -839,13 +839,14 @@ void SampleAlgorithm::OutputThread(void)
                     update_meta (batch_meta, icnt);
             }
 #if ((DS_VERSION_MAJOR * 100) + (DS_VERSION_MINOR * 10)) >= 610
+            printf("dummy meta insert %d fill dummy batch meta %d\n", m_dummyMetaInsert, m_fillDummyBatchMeta);
             if (m_dummyMetaInsert && batch_meta)
             {
-                update_dummy_meta_data_on_buffer (batch_meta);
+              update_dummy_meta_data_on_buffer (batch_meta);
             }
             if (m_fillDummyBatchMeta && batch_meta)
             {
-                fill_dummy_batch_meta_on_buffer (batch_meta);
+              fill_dummy_batch_meta_on_buffer (batch_meta);
             }
 #endif
 
@@ -861,6 +862,7 @@ void SampleAlgorithm::OutputThread(void)
 
                 NvBufSurfTransform (in_surf, out_surf, &transform_params);
                 trt_infer.trtInference(in_surf, out_surf);
+                trt_infer.fillBatchMetaData(batch_meta, in_surf->numFilled);
             }
 
             outSurf = out_surf;

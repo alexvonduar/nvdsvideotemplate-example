@@ -3,9 +3,11 @@
 
 #include <string>
 
+#include <opencv2/opencv.hpp>
+
 #include "NvInfer.h"
 #include <nppcore.h>
-#include <nppi_data_exchange_and_initialization.h>
+#include <nppi_arithmetic_and_logical_operations.h>
 
 #include <nvbufsurface.h>
 
@@ -14,6 +16,8 @@
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
 #include <cudaEGL.h>
 #endif
+
+#include "nv12_to_rgb_kernel.hpp"
 
 typedef struct _TRTBuffer
 {
@@ -31,10 +35,13 @@ typedef struct _TRTJob
     cudaStream_t stream;
     std::shared_ptr<nvinfer1::IExecutionContext> trtcontext;
     NppStreamContext nppcontext;
+    int inputWidth;
+    int inputHeight;
     std::vector<TRTBuffer> inputbuffers;
     std::vector<TRTBuffer> outputbuffers;
     int numBindings;
     void **bindings;
+    std::vector<std::vector<cv::Rect>> bboxes;
 } TRTJob;
 
 static std::string dataTypeName(const nvinfer1::DataType &t)
@@ -70,10 +77,54 @@ static std::string dimsToString(const nvinfer1::Dims &dims)
     return ret;
 }
 
+static inline bool _CHECK_CUDA(int e, int iLine, const char *szFile)
+{
+    if (e != cudaSuccess)
+    {
+        std::cout << "CUDA runtime error " << e << " at line " << iLine << " in file " << szFile;
+        exit(-1);
+        return false;
+    }
+    return true;
+}
+#define CHECK_CUDA(call) _CHECK_CUDA(call, __LINE__, __FILE__)
+
+static inline cv::Rect findBestRoi(const cv::Rect &srcRoi, const int &srcWidth, const int &srcHeight, const int &dstWidth, const int &dstHeight, const bool &doScale = false)
+{
+    cv::Rect result;
+    assert(srcRoi.width <= srcWidth);
+    assert(srcRoi.height <= srcHeight);
+    if (doScale)
+    {
+        if (srcRoi.width * dstHeight > srcRoi.height * dstWidth)
+        {
+            const int newHeight = srcRoi.width * dstHeight / dstWidth;
+            const auto newTop = srcRoi.y + newHeight < srcHeight ? srcRoi.y : srcHeight - newHeight - 1;
+            const auto newLeft = srcRoi.x + srcRoi.width < srcWidth ? srcRoi.x : srcWidth - srcRoi.width - 1;
+            result = cv::Rect(newLeft, newTop, srcRoi.width, newHeight);
+        }
+        else
+        {
+            const auto newWidth = srcRoi.height * dstWidth / dstHeight;
+            const auto newLeft = srcRoi.x + newWidth < srcWidth ? srcRoi.x : srcWidth - newWidth - 1;
+            const auto newTop = srcRoi.y + srcRoi.height < srcHeight ? srcRoi.y : srcHeight - srcRoi.height - 1;
+            result = cv::Rect(newLeft, newTop, newWidth, srcRoi.height);
+        }
+    }
+    else
+    {
+        const auto newLeft = srcRoi.x + dstWidth < srcWidth ? srcRoi.x : srcWidth - dstWidth - 1;
+        const auto newTop = srcRoi.y + dstHeight < srcHeight ? srcRoi.y : srcHeight - dstHeight - 1;
+        result = cv::Rect(newLeft, newTop, dstWidth, dstHeight);
+    }
+    std::cout << "input roi: " << srcRoi << " adjusted roi " << result << std::endl;
+    return result;
+}
+
 class TRTInfer
 {
 public:
-    void initialize(const std::string &trtModelFile, const int &inputBatch, const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames)
+    void initialize(const std::string &trtModelFile, const int &inputBatch, const std::vector<cv::Point2i> roi, const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames)
     {
 #if !defined(NDEBUG)
         sample::gLogger.setReportableSeverity(nvinfer1::ILogger::Severity::kVERBOSE);
@@ -82,6 +133,10 @@ public:
         // cudaStreamCreate(&m_stream);
         // nppSetStream(m_stream);
         // nppGetStreamContext(&m_nppcontext);
+
+        mRoi = roi;
+        // mRoiRect = cv::boundingRect(roi);
+        m_firstFrame = true;
 
         if (!m_trtruntime)
         {
@@ -160,6 +215,7 @@ public:
             TRTJob job;
             memset(&job, 0, sizeof(TRTJob));
             job.networkInputBatchSize = networkInputBatchSize;
+            job.bboxes.resize(networkInputBatchSize);
             cudaStreamCreate(&job.stream);
             job.trtcontext = std::shared_ptr<nvinfer1::IExecutionContext>{(m_trtengine->createExecutionContext())};
 
@@ -181,6 +237,19 @@ public:
                 buffer.dataType = m_trtengine->getBindingDataType(inputIndex);
                 buffer.dims = m_trtengine->getBindingDimensions(inputIndex);
                 buffer.batchSize = buffer.dims.nbDims < 3 ? 1 : buffer.dims.d[0];
+                if (job.inputWidth == 0 or job.inputHeight == 0)
+                {
+                    if (buffer.dims.nbDims == 3)
+                    {
+                        job.inputWidth = buffer.dims.d[2];
+                        job.inputHeight = buffer.dims.d[1];
+                    }
+                    else
+                    {
+                        job.inputWidth = buffer.dims.d[3];
+                        job.inputHeight = buffer.dims.d[2];
+                    }
+                }
                 sample::gLogInfo << "Job: " << i << " input: " << inputIndex << " type: " << dataTypeName(buffer.dataType) << " dims: " << dimsToString(buffer.dims) << std::endl;
                 buffer.size = samplesCommon::volume(buffer.dims) * samplesCommon::getElementSize(buffer.dataType);
                 // sample::gLogInfo << "buffer size: " << buffer.size << std::endl;
@@ -189,7 +258,7 @@ public:
                 buffer.memType = NVBUF_MEM_CUDA_DEVICE;
                 cudaMalloc(&buffer.buffer, buffer.size);
 #else
-                buffer.memType = NVBUF_MEM_CUDA_UNIFIED;
+                buffer.memType = NVBUF_MEM_CUDA_DEVICE;
                 cudaMallocManaged(&buffer.buffer, buffer.size);
 #endif
                 if (buffer.buffer == nullptr)
@@ -247,9 +316,41 @@ public:
             }
             m_trtJobs.emplace_back(job);
         }
+
+        sample::gLogInfo << "try create scratch surface" << std::endl;
+        if (m_scratchSurface != nullptr)
+        {
+            NvBufSurfaceDestroy(m_scratchSurface);
+        }
+        // else
+        //{
+        //     m_scratchSurface = new NvBufSurface();
+        // }
+
+        // FIXME: create temp surface
+        NvBufSurfaceCreateParams surfaceCreateParams;
+        surfaceCreateParams.layout = NVBUF_LAYOUT_PITCH;
+        surfaceCreateParams.colorFormat = NVBUF_COLOR_FORMAT_NV12;
+        assert(m_trtJobs[0].inputbuffers[0].dims.nbDims == 3 || m_trtJobs[0].inputbuffers[0].dims.nbDims == 4);
+        surfaceCreateParams.width = m_trtJobs[0].inputWidth;
+        surfaceCreateParams.height = m_trtJobs[0].inputHeight;
+        surfaceCreateParams.isContiguous = true;
+        surfaceCreateParams.size = 0;
+        surfaceCreateParams.gpuId = 0;
+#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+        surfaceCreateParams.memType = NVBUF_MEM_SURFACE_ARRAY;
+#else
+        surfaceCreateParams.memType = NVBUF_MEM_CUDA_DEVICE;
+#endif
+
+        if (NvBufSurfaceCreate(&m_scratchSurface, inputBatch, &surfaceCreateParams) != 0)
+        {
+            sample::gLogError << "create surface failed!" << std::endl;
+        }
+        NvBufSurfaceMemSet(m_scratchSurface, 0, 1, 128);
     }
 
-#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+#if 0 //defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
     void preprocessingImage(NvBufSurface *_surf)
     {
         // assert(_surf->numFilled == 1);
@@ -264,24 +365,8 @@ public:
         }
         else
         {
-            if (m_tmpsurf == nullptr)
-            {
-                sample::gLogError << "try creat scratch buffer" << std::endl;
-                // FIXME: create temp surface
-                NvBufSurfaceCreateParams surfaceCreateParams;
-                surfaceCreateParams.layout = NVBUF_LAYOUT_PITCH;
-                surfaceCreateParams.colorFormat = NVBUF_COLOR_FORMAT_NV12;
-                surfaceCreateParams.width = _surf->surfaceList[0].width;
-                surfaceCreateParams.height = _surf->surfaceList[0].height;
-                surfaceCreateParams.isContiguous = true;
-                surfaceCreateParams.size = 0;
-                surfaceCreateParams.gpuId = 0;
-                surfaceCreateParams.memType = _surf->memType;
 
-                m_tmpsurf = new NvBufSurface();
-                NvBufSurfaceCreate(&m_tmpsurf, batchSize, &surfaceCreateParams);
-            }
-            surf = m_tmpsurf;
+            surf = m_scratchSurface;
             NvBufSurfTransformParams transform_params;
             transform_params.transform_flag = NVBUFSURF_TRANSFORM_FILTER;
             transform_params.transform_flip = NvBufSurfTransform_None;
@@ -380,16 +465,92 @@ public:
         // assert(surf->numFilled == 1);
         //  FIXME: check gpuid to support multi-gpu
         // assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
-        auto unifiedMem = surf->memType == NVBUF_MEM_CUDA_UNIFIED;
-        if (unifiedMem)
+        //assert(surf->surfaceList[0].layout == NVBUF_LAYOUT_PITCH);
+        assert(m_scratchSurface->surfaceList[0].layout == NVBUF_LAYOUT_PITCH);
+        //auto unifiedMem = surf->memType == NVBUF_MEM_CUDA_UNIFIED;
+        sample::gLogInfo << "preprocess: input image memory type " << surf->memType << std::endl;
+        switch(surf->memType) {
+#if !defined(PLATFORM_TEGRA) or PLATFORM_TEGRA == 0
+        case NVBUF_MEM_DEFAULT:
+#endif
+        case NVBUF_MEM_CUDA_PINNED:
+        case NVBUF_MEM_CUDA_DEVICE:
+        case NVBUF_MEM_CUDA_UNIFIED:
         {
-            int status = NvBufSurfaceMap(surf, -1, -1, NVBUF_MAP_READ_WRITE);
+#if 0
+            int status = NvBufSurfaceMap(surf, -1, -1, NVBUF_MAP_READ);
             if (status != 0)
             {
                 sample::gLogError << "Failed to map surface" << std::endl;
                 return;
             }
+#endif
+            break;
         }
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+        case NVBUF_MEM_DEFAULT:
+#endif
+        case NVBUF_MEM_SURFACE_ARRAY:
+        {
+            break;
+        }
+        case NVBUF_MEM_HANDLE:
+        {
+            break;
+        }
+        case NVBUF_MEM_SYSTEM:
+        {
+            break;
+        }
+        default:
+        {
+            sample::gLogError << "Unsupported memory type" << std::endl;
+            return;
+        }
+        };
+
+        // crop and scale input surface
+        const auto inputW = surf->surfaceList[0].width;
+        const auto inputH = surf->surfaceList[0].height;
+        if (mRoiRect.empty())
+        {
+            // sample::gLogInfo << "input roi: " << mRoi << std::endl;
+            std::vector<cv::Point2i> inputRect{{0, 0}, {inputW, 0}, {inputW, inputH}, {0, inputH}};
+            std::vector<cv::Point2f> intersect;
+            cv::intersectConvexConvex(inputRect, mRoi, intersect);
+            mRoiRect = cv::boundingRect(intersect);
+            sample::gLogInfo << "input roi: " << mRoi << " intersect roi: " << mRoiRect << std::endl;
+        }
+
+        // do actual transform
+        // if (mRoiRect.width != inputW or mRoiRect.height != inputH) {
+        sample::gLogInfo << "do scale and crop from input source to scratch buffer" << std::endl;
+        mSrcRect = findBestRoi(mRoiRect, inputW, inputH, m_scratchSurface->surfaceList[0].width, m_scratchSurface->surfaceList[0].height, true);
+        mScale = float(m_scratchSurface->surfaceList[0].width) / mSrcRect.width;
+        sample::gLogInfo << "best src rect: " << mSrcRect  << " scale factor " << mScale << std::endl;
+        NvBufSurfTransformParams transform_params;
+        memset(&transform_params, 0, sizeof(NvBufSurfTransformParams));
+        transform_params.transform_flag = NVBUFSURF_TRANSFORM_FILTER | NVBUFSURF_TRANSFORM_CROP_SRC;
+        transform_params.transform_flip = NvBufSurfTransform_None;
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+        transform_params.transform_filter = NvBufSurfTransformInter_Default;
+#else
+        transform_params.transform_filter = NvBufSurfTransformInter_Algo4;
+#endif
+        NvBufSurfTransformRect src_rect;
+        src_rect.left = mSrcRect.x, src_rect.top = mSrcRect.y, src_rect.width = mSrcRect.width, src_rect.height = mSrcRect.height;
+        NvBufSurfTransformRect dst_rect;
+        dst_rect.left = 0, dst_rect.top = 0, dst_rect.width = m_scratchSurface->surfaceList[0].width, dst_rect.height = m_scratchSurface->surfaceList[0].height;
+        transform_params.src_rect = &src_rect;
+        // transform_params.dst_rect = &dst_rect;
+        const auto tstatus = NvBufSurfTransform(surf, m_scratchSurface, &transform_params);
+        if (tstatus != NvBufSurfTransformError_Success) {
+            sample::gLogError << "failed transform: " << tstatus << std::endl;
+            return;
+        }
+        DumpNvBufSurface(m_scratchSurface, nullptr, "NVTransform_");
+
+        //}
 
         // assert(surf->batchSize == m_trtInputBuffers[0].batchSize);
 
@@ -397,78 +558,106 @@ public:
         const auto numJobs = m_trtJobs.size();
         const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
         NppStatus npp_status;
-        for (int i = 0; i < surf->numFilled; i++)
+        for (int i = 0; i < m_scratchSurface->numFilled; i++)
         {
             const auto jobIndex = i / networkInputBatchSize;
             const auto batchIndex = i % networkInputBatchSize;
             const auto networkInputBatchSize = m_trtJobs[jobIndex].networkInputBatchSize;
             const auto inputSizePerBatch = m_trtJobs[jobIndex].inputbuffers[0].size / networkInputBatchSize;
             auto inputBuffer = reinterpret_cast<unsigned char *>(m_trtJobs[jobIndex].inputbuffers[0].buffer) + batchIndex * inputSizePerBatch;
-            const auto w = surf->surfaceList[i].width;
-            const auto h = surf->surfaceList[i].height;
-            const auto p = surf->surfaceList[i].pitch;
-            assert(surf->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_NV12);
-            assert(surf->surfaceList[i].layout == NVBUF_LAYOUT_PITCH);
-            assert(surf->surfaceList[i].planeParams.num_planes == 2);
-            const auto plane_w = surf->surfaceList[i].planeParams.width[0];
-            const auto plane_h = surf->surfaceList[i].planeParams.height[0];
-            const auto plane_p = surf->surfaceList[i].planeParams.pitch[0];
+            sample::gLogInfo << "preprocessing: " << (void *)inputBuffer << std::endl;
+            const auto w = m_scratchSurface->surfaceList[i].width;
+            const auto h = m_scratchSurface->surfaceList[i].height;
+            const auto p = m_scratchSurface->surfaceList[i].pitch;
+            assert(m_scratchSurface->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_NV12);
+            assert(m_scratchSurface->surfaceList[i].layout == NVBUF_LAYOUT_PITCH);
+            assert(m_scratchSurface->surfaceList[i].planeParams.num_planes == 2);
+            const auto plane_w = m_scratchSurface->surfaceList[i].planeParams.width[0];
+            const auto plane_h = m_scratchSurface->surfaceList[i].planeParams.height[0];
+            const auto plane_p = m_scratchSurface->surfaceList[i].planeParams.pitch[0];
             assert(w == plane_w);
             assert(h == plane_h);
             assert(p == plane_p);
             // assert(w == p);
-            const auto plane_offset = surf->surfaceList[i].planeParams.offset[0];
-            NppiSize oSizeROI{plane_w, plane_h};
-            // nppSetStream(m_stream);
-            // NppStreamContext nppStreamCtx;
-            // nppGetStreamContext(&nppStreamCtx);
-            if (m_trtJobs[jobIndex].nppcontext.hStream == nullptr)
-            {
-                npp_status = nppSetStream(m_trtJobs[jobIndex].stream);
-                if (npp_status != NPP_SUCCESS)
-                {
-                    sample::gLogError << "set npp stream error: " << npp_status << std::endl;
-                }
-                npp_status = nppGetStreamContext(&m_trtJobs[jobIndex].nppcontext);
-                if (npp_status != NPP_SUCCESS)
-                {
-                    sample::gLogError << "get npp stream context error: " << npp_status << std::endl;
-                }
-            }
-            Npp8u *pSrc = nullptr;
-            if (unifiedMem)
-            {
-                pSrc = reinterpret_cast<Npp8u *>(surf->surfaceList[i].mappedAddr.addr[0]) + plane_offset;
-            }
-            else
-            {
-                pSrc = reinterpret_cast<Npp8u *>(surf->surfaceList[i].dataPtr) + plane_offset;
-            }
-            auto pDst = reinterpret_cast<Npp32f *>(inputBuffer);
-            sample::gLogInfo << "preprocess: " << reinterpret_cast<void *>(pSrc) << " " << reinterpret_cast<void *>(pDst) << std::endl;
-            if (m_trtJobs[jobIndex].nppcontext.hStream == nullptr)
-            {
-                npp_status = nppiScale_8u32f_C1R(pSrc, plane_p, pDst, plane_p * sizeof(float), oSizeROI, 0.0, 1.0);
-            }
-            else
-            {
-                npp_status = nppiScale_8u32f_C1R_Ctx(pSrc, plane_p, pDst, plane_p * sizeof(float), oSizeROI, 0.0, 1.0, m_trtJobs[jobIndex].nppcontext);
-            }
-            // cudaStreamSynchronize(m_nppStream);
-            if (npp_status != NPP_SUCCESS)
-            {
-                sample::gLogError << "preprocessing npp error: " << npp_status << std::endl;
-            }
-        }
+            const auto src_y = ((unsigned char *)m_scratchSurface->surfaceList[i].dataPtr) + m_scratchSurface->surfaceList[i].planeParams.offset[0];
+            const auto src_uv = ((unsigned char *)m_scratchSurface->surfaceList[i].dataPtr) + m_scratchSurface->surfaceList[i].planeParams.offset[1];
+            auto dst_y = reinterpret_cast<Npp32f *>(inputBuffer);
 
-        if (unifiedMem)
-        {
-            NvBufSurfaceUnMap(surf, -1, -1);
+            // normalize parameters
+            // mean [0.485*255,0.456*255,0.406*255]
+            // sigma [0.229*255,0.224*255,0.225*255]
+            batched_convert_nv12_to_rgb(
+                src_y,
+                src_uv,
+                w,
+                p,
+                h,
+                1,
+                NV12Format::PitchLinear,
+                dst_y,
+                w,
+                w,
+                h,
+                DataType::Float32,
+                PixelLayout::NCHW_BGR,
+                Interpolation::Bilinear,
+                0.485f * 255, 0.456 * 255, 0.406 * 255, 255.f / 0.229, 255.f / 0.224, 255.f / 0.225,
+                m_trtJobs[jobIndex].stream);
+            if (m_firstFrame) {
+                assert(m_trtJobs[jobIndex].inputbuffers[1].size == m_trtJobs[jobIndex].inputbuffers[0].size);
+                cudaMemcpyAsync(m_trtJobs[jobIndex].inputbuffers[1].buffer, inputBuffer, m_trtJobs[jobIndex].inputbuffers[0].size, cudaMemcpyDeviceToDevice, m_trtJobs[jobIndex].stream);
+            }
         }
+        if (m_firstFrame) {
+            m_firstFrame = false;
+        }
+        DumpNCHW(&(m_trtJobs[0].inputbuffers[0]), "input_job0_0_");
+        DumpNCHW(&(m_trtJobs[0].inputbuffers[1]), "input_job0_1_");
+
+        switch (surf->memType)
+        {
+#if !defined(PLATFORM_TEGRA) or PLATFORM_TEGRA == 0
+        case NVBUF_MEM_DEFAULT:
+#endif
+        case NVBUF_MEM_CUDA_PINNED:
+        case NVBUF_MEM_CUDA_DEVICE:
+        case NVBUF_MEM_CUDA_UNIFIED:
+        {
+#if 0
+            int status = NvBufSurfaceUnMap(surf, -1, -1);
+            if (status != 0)
+            {
+                sample::gLogError << "Failed to map surface" << std::endl;
+                return;
+            }
+#endif
+            break;
+        }
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+        case NVBUF_MEM_DEFAULT:
+#endif
+        case NVBUF_MEM_SURFACE_ARRAY:
+        {
+            break;
+        }
+        case NVBUF_MEM_HANDLE:
+        {
+            break;
+        }
+        case NVBUF_MEM_SYSTEM:
+        {
+            break;
+        }
+        default:
+        {
+            sample::gLogError << "Unsupported memory type" << std::endl;
+            return;
+        }
+        };
     }
 #endif
 
-#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+#if 0 //defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
     void postprocessingImage(NvBufSurface *surf)
     {
         assert(surf->memType == NVBUF_MEM_SURFACE_ARRAY);
@@ -571,109 +760,137 @@ public:
         NvBufSurfaceUnMapEglImage(surf, -1);
     }
 #else
+    static inline int trtDType2cvDType(const nvinfer1::DataType& type, const int& channels)
+    {
+        switch (type)
+        {
+        case nvinfer1::DataType::kFLOAT:
+            return CV_MAKE_TYPE(CV_32F, channels);
+        case nvinfer1::DataType::kHALF:
+            return CV_MAKE_TYPE(CV_16S, channels);
+        case nvinfer1::DataType::kINT8:
+            return CV_MAKE_TYPE(CV_8S, channels);
+        case nvinfer1::DataType::kINT32:
+            return CV_MAKE_TYPE(CV_32S, channels);
+        case nvinfer1::DataType::kBOOL:
+            return CV_MAKE_TYPE(CV_8U, channels);
+#if ((NV_TENSORRT_MAJOR * 1000) + (NV_TENSORRT_MINOR * 100) + (NV_TENSORRT_PATCH * 10)) >= 8510
+        case nvinfer1::DataType::kUINT8:
+            return CV_MAKE_TYPE(CV_8U, channels);
+#endif
+        default:
+            return 0;
+        }
+    }
+
+    void updateReference(const int& frameIndex, const cv::Mat& mask)
+    {
+        cv::Mat mask8u;
+        if (mask.type() == CV_8UC1) {
+            mask8u = mask;
+        } else {
+            mask.convertTo(mask8u, CV_8UC1);
+        }
+        cv::cuda::GpuMat maskGpu(mask8u);
+
+        const auto numJobs = m_trtJobs.size();
+        const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
+        const auto jobIndex = frameIndex / networkInputBatchSize;
+        const auto batchIndex = frameIndex % networkInputBatchSize;
+        const auto& j = m_trtJobs[jobIndex];
+        //for (const auto& j: m_trtJobs) {
+            nppSetStream(j.stream);
+            NppStreamContext nppStreamCtx;
+            nppGetStreamContext(&nppStreamCtx);
+            const auto batchSize = j.networkInputBatchSize;
+            const auto outputSizePerBatch = j.outputbuffers[0].size / batchSize;
+            const auto dims = j.inputbuffers[0].dims;
+            assert(dims.nbDims == 4);
+            const auto N = dims.d[0];
+            assert(N == batchSize);
+            const auto C = dims.d[1];
+            const auto H = dims.d[2];
+            const auto W = dims.d[3];
+            const auto dtype = j.inputbuffers[0].dataType;
+            assert(H == mask8u.rows);
+            assert(W == mask8u.cols);
+            const auto bufferSizePerChannelInBytes = H * W * samplesCommon::getElementSize(dtype);
+            auto referenceBuffer = reinterpret_cast<unsigned char *>(j.inputbuffers[1].buffer);
+            auto currentBuffer = reinterpret_cast<unsigned char *>(j.inputbuffers[0].buffer);
+            NppiSize roi{W, H};
+            const auto n = batchIndex;
+            //for (int n = 0; n < N; n++) {
+                for (int c = 0; c < C; c++) {
+                    sample::gLogInfo << "update reference " << n << " " << c << " " << H << " " << W << std::endl;
+                    const auto reference = reinterpret_cast<float *>(referenceBuffer + (n * C + c) * bufferSizePerChannelInBytes);
+                    const auto current = reinterpret_cast<float *>(currentBuffer + (n * C + c) * bufferSizePerChannelInBytes);
+                    NppStatus npp_status = nppiAddWeighted_32f_C1IMR_Ctx(current, W * sizeof(float), maskGpu.data, W, reference, W * sizeof(float), roi, 0.6, nppStreamCtx);
+                    if (npp_status != NPP_NO_ERROR)
+                    {
+                        sample::gLogError << "update reference npp error " << npp_status << std::endl;
+                    }
+                }
+            //}
+        //}
+    }
+
     void postprocessingImage(NvBufSurface *surf)
     {
-        // assert(surf->batchSize == m_trtOutputBuffers[0].batchSize);
-
-        // FIXME: check gpuid to support multi-gpu
-        // assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
-        auto unifiedMem = surf->memType == NVBUF_MEM_CUDA_UNIFIED;
-        if (unifiedMem)
-        {
-            int status = NvBufSurfaceMap(surf, -1, -1, NVBUF_MAP_READ_WRITE);
-            if (status != 0)
-            {
-                sample::gLogError << "Failed to map surface" << std::endl;
-                return;
-            }
-        }
-
         const auto numJobs = m_trtJobs.size();
         const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
         // const auto batchSize = surf->batchSize;
         // const auto outputSizePerBatch = m_trtOutputBuffers[0].size / batchSize;
         // auto outputBuffer = reinterpret_cast<unsigned char *>(m_trtOutputBuffers[0].buffer);
-        NppStatus npp_status;
+        NppStatus npp_status = NPP_NO_ERROR;
         for (int i = 0; i < surf->numFilled; i++)
         {
             const auto jobIndex = i / networkInputBatchSize;
             const auto batchIndex = i % networkInputBatchSize;
             const auto networkInputBatchSize = m_trtJobs[jobIndex].networkInputBatchSize;
             const auto outputSizePerBatch = m_trtJobs[jobIndex].outputbuffers[0].size / networkInputBatchSize;
+            DumpNCHW(&(m_trtJobs[jobIndex].outputbuffers[0]), "output_job_" + std::to_string(jobIndex) + "_0_");
             auto outputBuffer = reinterpret_cast<unsigned char *>(m_trtJobs[jobIndex].outputbuffers[0].buffer) + batchIndex * outputSizePerBatch;
-
-            const auto w = surf->surfaceList[i].width;
-            const auto h = surf->surfaceList[i].height;
-            const auto p = surf->surfaceList[i].pitch;
-            assert(surf->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_NV12 ||
-                   surf->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_NV12_ER ||
-                   surf->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_NV12_709 ||
-                   surf->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_NV12_709_ER ||
-                   surf->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_NV12_2020);
-            assert(surf->surfaceList[i].layout == NVBUF_LAYOUT_PITCH);
-            assert(surf->surfaceList[i].planeParams.num_planes == 2);
-            const auto plane_w = surf->surfaceList[i].planeParams.width[0];
-            const auto plane_h = surf->surfaceList[i].planeParams.height[0];
-            const auto plane_p = surf->surfaceList[i].planeParams.pitch[0];
-            assert(w == plane_w);
-            assert(h == plane_h);
-            assert(p == plane_p);
-            assert(w == p);
-            const auto plane_offset = surf->surfaceList[i].planeParams.offset[0];
-            NppiSize oSizeROI{plane_w, plane_h};
-            // cudaStream_t stream;
-            // cudaStreamCreate(&stream);
-            // nppSetStream(stream);
-            // NppStreamContext nppStreamCtx;
-            // nppGetStreamContext(&nppStreamCtx);
-            Npp8u *pDst = nullptr;
-            if (unifiedMem)
-            {
-                pDst = reinterpret_cast<Npp8u *>(surf->surfaceList[i].mappedAddr.addr[0]) + plane_offset;
+            sample::gLogInfo << "output job " << jobIndex << " batch " \
+                << batchIndex << " buffer " << reinterpret_cast<void *>(outputBuffer) \
+                << " size " << outputSizePerBatch << std::endl;
+            const auto dims = m_trtJobs[jobIndex].outputbuffers[0].dims;
+            const auto dataType = m_trtJobs[jobIndex].outputbuffers[0].dataType;
+            assert(dims.nbDims == 4 and dims.d[0] == 1 and dims.d[1] == 2 and dims.d[2] == 800 and dims.d[3] == 1408);
+            const auto bufferSize = outputSizePerBatch / dims.d[1];
+            const auto output0 = outputBuffer;
+            const auto output1 = outputBuffer + bufferSize;
+            cv::cuda::GpuMat output1GpuMat(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1), output1);
+            cv::Mat output1CpuMat(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1));
+            CHECK_CUDA(cudaMemcpyAsync(output1CpuMat.data, output1, bufferSize, cudaMemcpyDeviceToHost, m_trtJobs[jobIndex].stream));
+            CHECK_CUDA(cudaStreamSynchronize(m_trtJobs[jobIndex].stream));
+            cv::Mat cpuMask(dims.d[2], dims.d[3], CV_8UC1);
+            cv::threshold(output1CpuMat, output1CpuMat, 0, 255, cv::THRESH_BINARY);
+            output1CpuMat.convertTo(cpuMask, CV_8UC1);
+            cv::dilate(cpuMask, cpuMask, cv::Mat());
+            std::vector<std::vector<cv::Point>> contours;
+            std::vector<cv::Vec4i> hierarchy;
+            cv::findContours(cpuMask, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            m_trtJobs[jobIndex].bboxes[batchIndex].clear();
+            if (contours.size()) {
+                std::vector<cv::Point> hull;
+                //std::vector<std::vector<cv::Point> >hulls;
+                //hulls.reserve(contours.size());
+                for (const auto& c: contours) {
+                    //std::vector<cv::Point> hull;
+                    cv::convexHull(c, hull);
+                    //hulls.emplace_back(hull);
+                    auto rect = cv::boundingRect(hull);
+                    rect.x = (rect.x / mScale) + mSrcRect.x;
+                    rect.y = (rect.y / mScale) + mSrcRect.y;
+                    rect.width /= mScale;
+                    rect.height /= mScale;
+                    m_trtJobs[jobIndex].bboxes[batchIndex].emplace_back(rect);
+                }
             }
-            else
-            {
-                pDst = reinterpret_cast<Npp8u *>(surf->surfaceList[i].dataPtr) + plane_offset;
-            }
-            auto pSrc = reinterpret_cast<Npp32f *>(outputBuffer);
-            // std::cout << "output buffer: " << m_trtOutputBuffer << std::endl;
-            // printf("output src %p dst %p\n", pSrc, pDst);
-            sample::gLogInfo << "output src " << reinterpret_cast<void *>(pSrc) << " dst " << reinterpret_cast<void *>(pDst) << std::endl;
-            sample::gLogInfo << "output plane pitch " << plane_p << std::endl;
-            if (m_trtJobs[jobIndex].nppcontext.hStream == nullptr)
-            {
-                npp_status = nppiScale_32f8u_C1R(pSrc, plane_p * sizeof(float), pDst, plane_p, oSizeROI, 0.0, 1.0);
-            }
-            else
-            {
-                npp_status = nppiScale_32f8u_C1R_Ctx(pSrc, plane_p * sizeof(float), pDst, plane_p, oSizeROI, 0.0, 1.0, m_trtJobs[jobIndex].nppcontext);
-            }
-            if (npp_status != NPP_NO_ERROR)
-            {
-                sample::gLogError << "post processing npp error " << npp_status << std::endl;
-            }
-            // cudaStreamSynchronize(m_nppStream);
-            // cudaStreamDestroy(stream);
-        }
-
-        if (unifiedMem)
-        {
-            NvBufSurfaceUnMap(surf, -1, -1);
+            updateReference(i, cpuMask);
         }
     }
 #endif
-
-    static inline bool CHECK_(int e, int iLine, const char *szFile)
-    {
-        if (e != cudaSuccess)
-        {
-            std::cout << "CUDA runtime error " << e << " at line " << iLine << " in file " << szFile;
-            exit(-1);
-            return false;
-        }
-        return true;
-    }
-#define CHECK_CUDA(call) CHECK_(call, __LINE__, __FILE__)
 
     void trtInference(NvBufSurface *input, NvBufSurface *output)
     {
@@ -684,6 +901,7 @@ public:
         //  cudaStreamCreate(&stream);
         for (int i = 0; i < m_trtJobs.size(); ++i)
         {
+            sample::gLogInfo << "infer job: " << i << std::endl;
             bool status = m_trtJobs[i].trtcontext->enqueueV2(m_trtJobs[i].bindings, m_trtJobs[i].stream, nullptr);
             // cudaStreamSynchronize(m_stream);
             //  cudaStreamDestroy(stream);
@@ -723,21 +941,63 @@ public:
                 b.buffer = nullptr;
             }
         }
-#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-        if (m_tmpsurf)
+
+        if (m_scratchSurface)
         {
-            NvBufSurfaceDestroy(m_tmpsurf);
-            m_tmpsurf = NULL;
+            NvBufSurfaceDestroy(m_scratchSurface);
+            // delete m_scratchSurface;
+            m_scratchSurface = nullptr;
         }
-#endif
     }
 
-    TRTInfer()
-#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-        : m_tmpsurf(nullptr)
+    TRTInfer() : m_scratchSurface(nullptr), m_firstFrame(true)
+#if !defined(NDEBUG) or NDEBUG == 0
+    , dump_max_frames(1), dump_max_nchw(3)
 #endif
-
     {
+    }
+
+    void fillBatchMetaData (NvDsBatchMeta *batch_meta, const int& numFilled)
+    {
+        if (batch_meta == nullptr)
+        {
+            return;
+        }
+        NvDsMetaList * l_frame = NULL;
+        for (int i = 0; i < numFilled; i ++)
+        //for (l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next)
+        {
+            NvDsFrameMeta *frame_meta = nvds_get_nth_frame_meta(batch_meta->frame_meta_list, i);
+            //NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
+            /*printf ("pad_index = %d frame_width = %d frame_height = %d\n",
+                    frame_meta->pad_index, frame_meta->source_frame_width, frame_meta->source_frame_height);*/
+            const auto inputBatchSize = m_trtJobs[0].networkInputBatchSize;
+            const auto jobIndex = i / inputBatchSize;
+            const auto batchIndex = i % inputBatchSize;
+            for (const auto& b : m_trtJobs[jobIndex].bboxes[batchIndex])
+            {
+                NvDsObjectMeta *obj_meta = nvds_acquire_obj_meta_from_pool (batch_meta);
+                obj_meta->unique_component_id = 0xAB;
+                obj_meta->confidence = 0.0;
+
+                /* This is an untracked object. Set tracking_id to -1. */
+                obj_meta->object_id = UNTRACKED_OBJECT_ID;
+                obj_meta->class_id = 2;
+
+                NvOSD_RectParams & rect_params = obj_meta->rect_params;
+                /* Assign bounding box coordinates. */
+                rect_params.left = b.x;
+                rect_params.top = b.y;
+                rect_params.width = b.width;
+                rect_params.height = b.height;
+                rect_params.border_color.red = 1.0;
+                rect_params.border_color.green = 0.5;
+                rect_params.border_color.blue = 0.0;
+                rect_params.border_width = 2;
+
+                nvds_add_obj_meta_to_frame (frame_meta, obj_meta, NULL);
+            }
+        }
     }
 
 private:
@@ -753,17 +1013,238 @@ private:
     //  char *m_trtOutputBuffer;
     //   cudaStream_t m_nppStream;
     // NppStreamContext m_nppcontext;
-#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-    NvBufSurface *m_tmpsurf;
-#endif
+    NvBufSurface *m_scratchSurface;
     // int m_numBindings;
     // void **m_bindings;
     static std::string const DEF_ENGINE_NAME;
     static std::string const INPUT_LAYER_NAME;
     static std::string const OUTPUT_LAYER_NAME;
+    std::vector<cv::Point2i> mRoi;
+    cv::Rect mRoiRect;
+    cv::Rect mSrcRect;
+    double mScale;
+    bool m_firstFrame;
+#if !defined(NDEBUG) or NDEBUG == 0
+    int dump_max_frames;
+    int dump_max_nchw;
+#endif
+
+    // Helper function to dump the nvbufsurface, used for debugging purpose
+    void DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_meta, const std::string& prefix = "");
+    // Helper function to dump the nchw buffer, used for debugging purpose
+    void DumpNCHW(TRTBuffer *input, const std::string& prefix = "");
 };
 
 const std::string TRTInfer::DEF_ENGINE_NAME = "best_1x1x720x1280.engine"; //"float_int8.engine";
 const std::string TRTInfer::INPUT_LAYER_NAME = "Placeholder:0";
 const std::string TRTInfer::OUTPUT_LAYER_NAME = "transpose_1:0";
+
+void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_meta, const std::string& prefix)
+{
+#if !defined(NDEBUG) or NDEBUG == 0
+    void *tmpBuffer = nullptr;
+    const auto numFilled = in_surface->numFilled;
+    int source_id = 0;
+    int i = 0;
+    std::ofstream outfile;
+    void *input_data = NULL;
+    int size = 0;
+
+    if (dump_max_frames)
+    {
+        dump_max_frames--;
+    }
+    else
+    {
+        return;
+    }
+
+    if (in_surface->memType == NVBUF_MEM_SURFACE_ARRAY) {
+        const auto status = NvBufSurfaceMap(in_surface, -1, -1, NVBUF_MAP_READ);
+        if (status != 0)
+        {
+            sample::gLogError << "Failed to map surface" << std::endl;
+            return;
+        }
+        NvBufSurfaceSyncForCpu(in_surface, -1, -1);
+    }
+
+    for (i = 0; i < numFilled; i++)
+    {
+        if (batch_meta)
+        {
+            NvDsFrameMeta *frame_meta = nvds_get_nth_frame_meta(batch_meta->frame_meta_list, i);
+            source_id = frame_meta->pad_index;
+        }
+
+        std::string tmp = prefix.length() ? prefix : "NvSurface_";
+        tmp += std::to_string(in_surface->surfaceList[i].pitch) + "x" + std::to_string(in_surface->surfaceList[i].height) + "_" +
+                            "BS-" + std::to_string(source_id);
+
+        input_data = in_surface->surfaceList[i].dataPtr;
+
+        // input_size = in_surface->surfaceList[i].dataSize;
+
+        switch (in_surface->surfaceList[i].colorFormat)
+        {
+        case NVBUF_COLOR_FORMAT_NV12:
+        case NVBUF_COLOR_FORMAT_NV12_2020:
+        case NVBUF_COLOR_FORMAT_NV12_709:
+        case NVBUF_COLOR_FORMAT_NV12_709_ER:
+        case NVBUF_COLOR_FORMAT_NV12_ER:
+        {
+            std::string fname = tmp + ".nv12";
+
+            size = (in_surface->surfaceList[i].pitch * in_surface->surfaceList[i].height * 3) / 2;
+            assert(in_surface->surfaceList[i].layout == NVBUF_LAYOUT_PITCH);
+
+            if (tmpBuffer == nullptr)
+            {
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+                tmpBuffer = malloc(size);
+#else
+                CHECK_CUDA(cudaMallocHost(&tmpBuffer, size));
+#endif
+                outfile.open(fname, std::ofstream::out);
+            }
+            else
+            {
+                outfile.open(fname, std::ofstream::out | std::ofstream::app);
+            }
+
+            if (in_surface->memType == NVBUF_MEM_SURFACE_ARRAY) {
+                const auto y = (char *)(in_surface->surfaceList[i].mappedAddr.addr[0]);
+                const auto uv = (char *)(in_surface->surfaceList[i].mappedAddr.addr[1]);
+                outfile.write(y, in_surface->surfaceList[i].pitch * in_surface->surfaceList[i].height);
+                outfile.write(uv, in_surface->surfaceList[i].pitch * in_surface->surfaceList[i].height / 2);
+            } else {
+                cudaMemcpy2D(tmpBuffer,
+                                in_surface->surfaceList[i].pitch, input_data, in_surface->surfaceList[i].pitch,
+                                in_surface->surfaceList[i].pitch,
+                                (in_surface->surfaceList[i].height * 3) / 2, cudaMemcpyDeviceToHost);
+                outfile.write(reinterpret_cast<char *>(tmpBuffer), size);
+            }
+
+            outfile.close();
+        }
+        break;
+
+        case NVBUF_COLOR_FORMAT_RGBA:
+        case NVBUF_COLOR_FORMAT_BGRx:
+        {
+            std::string fname = tmp;
+
+            if (in_surface->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_RGBA)
+                fname.append(".rgba");
+            else if (in_surface->surfaceList[i].colorFormat == NVBUF_COLOR_FORMAT_BGRx)
+                fname.append(".bgrx");
+
+            size = in_surface->surfaceList[i].width * in_surface->surfaceList[i].height * 4;
+
+            if (tmpBuffer == NULL)
+            {
+                CHECK_CUDA(cudaMallocHost(&tmpBuffer, size));
+                outfile.open(fname, std::ofstream::out);
+            }
+            else
+            {
+                outfile.open(fname, std::ofstream::out | std::ofstream::app);
+            }
+
+            cudaMemcpy2D(tmpBuffer,
+                            in_surface->surfaceList[i].width * 4, input_data,
+                            in_surface->surfaceList[i].width * 4, in_surface->surfaceList[i].width * 4,
+                            in_surface->surfaceList[i].height, cudaMemcpyDeviceToHost);
+
+            outfile.write(reinterpret_cast<char *>(tmpBuffer), size);
+            outfile.close();
+        }
+        break;
+
+        default:
+            sample::gLogError << "dump surface : NOT SUPPORTED FORMAT " << in_surface->surfaceList[i].colorFormat << std::endl;
+            break;
+        }
+    }
+    if (in_surface->memType == NVBUF_MEM_SURFACE_ARRAY) {
+        const int status = NvBufSurfaceUnMap(in_surface, -1, -1);
+        if (status != 0)
+        {
+            sample::gLogError << "Failed to map surface" << std::endl;
+            return;
+        }
+    }
+
+    if (tmpBuffer != nullptr)
+    {
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+        free(tmpBuffer);
+        tmpBuffer = nullptr;
+#else
+        CHECK_CUDA(cudaFreeHost(tmpBuffer));
+#endif
+    }
+#endif
+}
+
+void TRTInfer::DumpNCHW(TRTBuffer *input, const std::string& prefix)
+{
+#if !defined(NDEBUG) or NDEBUG == 0
+    std::ofstream outfile;
+    void *input_data = nullptr;
+    int size = 0;
+
+    if (dump_max_nchw)
+    {
+        dump_max_nchw--;
+    }
+    else
+    {
+        return;
+    }
+
+    std::string tmp = prefix.length() ? prefix : "NCHW_";
+    tmp += std::to_string(input->dims.d[0]);
+    for (int j = 1; j < input->dims.nbDims; ++j)
+    {
+        tmp += "x" + std::to_string(input->dims.d[j]);
+    }
+
+    // tmp += "_";
+    input_data = input->buffer;
+
+    int cv_input_type;
+    switch (input->dataType)
+    {
+    case nvinfer1::DataType::kFLOAT:
+        tmp += "_float";
+        cv_input_type = CV_32FC1;
+        size = input->size / sizeof(float);
+        break;
+    case nvinfer1::DataType::kHALF:
+        tmp += "_half";
+        cv_input_type = CV_16FC1;
+        size = input->size / sizeof(short);
+        break;
+    case nvinfer1::DataType::kINT8:
+        tmp += "_int8";
+        cv_input_type = CV_8SC1;
+        size = input->size;
+        break;
+    default:
+        tmp += "_unknown";
+        break;
+    }
+    cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
+    cv::Mat normMat; //{1, size, cv_input_type};
+    std::string fname = tmp + ".nchw";
+    gpuMat.download(normMat);
+    cv::normalize(normMat, normMat, 0, 255, cv::NORM_MINMAX, cv_input_type);
+    normMat.convertTo(normMat, CV_8UC1);
+    outfile.open(fname, std::ofstream::out);
+    outfile.write((char *)(normMat.ptr()), size);
+    outfile.close();
+#endif
+}
+
 #endif //_CUSTOMLIB_TRT_HPP_

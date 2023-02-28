@@ -15,6 +15,7 @@ gi.require_version("Gst", "1.0")
 #gi.require_version("GstRtspServer", "1.0")
 from gi.repository import Gst, GLib
 import configparser
+import pyds
 
 import argparse
 
@@ -32,6 +33,121 @@ GST_CAPS_FEATURES_NVMM = "memory:NVMM"
 OSD_PROCESS_MODE = 0
 OSD_DISPLAY_TEXT = 0
 #pgie_classes_str = ["Vehicle", "TwoWheeler", "Person", "RoadSign"]
+
+PGIE_CLASS_ID_VEHICLE = 0
+PGIE_CLASS_ID_BICYCLE = 1
+PGIE_CLASS_ID_PERSON = 2
+PGIE_CLASS_ID_ROADSIGN = 3
+
+def parse_ds_version():
+    global DS_VERSION_MAJOR
+    DS_VERSION_MAJOR = 6
+    global DS_VERSION_MINOR
+    DS_VERSION_MINOR = 0
+    global DS_VERSION_PATCH
+    DS_VERSION_PATCH = 0
+    with open("/opt/nvidia/deepstream/deepstream/version") as f:
+        for line in f:
+            if "version:" in line.lower():
+                v = line.lower().replace("version:", "").strip().split(".")
+                print("DeepStream version: ", v)
+                if len(v) == 3:
+                    DS_VERSION_MAJOR = int(v[0])
+                    DS_VERSION_MINOR = int(v[1])
+                    DS_VERSION_PATCH = int(v[2])
+                    break
+                elif (len(v) == 2):
+                    DS_VERSION_MAJOR = int(v[0])
+                    DS_VERSION_MINOR = int(v[1])
+                    break
+    global DS_VERSION_NUMBER
+    DS_VERSION_NUMBER = (DS_VERSION_MAJOR * 1000) + (DS_VERSION_MINOR * 100) + DS_VERSION_PATCH
+
+def osd_sink_pad_buffer_probe(pad,info,u_data):
+    frame_number=0
+    num_rects=0
+
+    gst_buffer = info.get_buffer()
+    if not gst_buffer:
+        print("Unable to get GstBuffer ")
+        return
+
+    # Retrieve batch metadata from the gst_buffer
+    # Note that pyds.gst_buffer_get_nvds_batch_meta() expects the
+    # C address of gst_buffer as input, which is obtained with hash(gst_buffer)
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+    l_frame = batch_meta.frame_meta_list
+    while l_frame is not None:
+        try:
+            # Note that l_frame.data needs a cast to pyds.NvDsFrameMeta
+            # The casting is done by pyds.NvDsFrameMeta.cast()
+            # The casting also keeps ownership of the underlying memory
+            # in the C code, so the Python garbage collector will leave
+            # it alone.
+            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+        except StopIteration:
+            break
+
+        #Intiallizing object counter with 0.
+        obj_counter = {
+            PGIE_CLASS_ID_VEHICLE:0,
+            PGIE_CLASS_ID_PERSON:0,
+            PGIE_CLASS_ID_BICYCLE:0,
+            PGIE_CLASS_ID_ROADSIGN:0
+        }
+        frame_number=frame_meta.frame_num
+        num_rects = frame_meta.num_obj_meta
+        l_obj=frame_meta.obj_meta_list
+        while l_obj is not None:
+            try:
+                # Casting l_obj.data to pyds.NvDsObjectMeta
+                obj_meta=pyds.NvDsObjectMeta.cast(l_obj.data)
+            except StopIteration:
+                break
+            obj_counter[obj_meta.class_id] += 1
+            obj_meta.rect_params.border_color.set(0.0, 0.0, 1.0, 0.8) #0.8 is alpha (opacity)
+            try:
+                l_obj=l_obj.next
+            except StopIteration:
+                break
+
+        # Acquiring a display meta object. The memory ownership remains in
+        # the C code so downstream plugins can still access it. Otherwise
+        # the garbage collector will claim it when this probe function exits.
+        display_meta=pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+        display_meta.num_labels = 1
+        py_nvosd_text_params = display_meta.text_params[0]
+        # Setting display text to be shown on screen
+        # Note that the pyds module allocates a buffer for the string, and the
+        # memory will not be claimed by the garbage collector.
+        # Reading the display_text field here will return the C address of the
+        # allocated string. Use pyds.get_string() to get the string content.
+        py_nvosd_text_params.display_text = "Frame Number={} Number of Objects={} Vehicle_count={} Person_count={}".format(frame_number, num_rects, obj_counter[PGIE_CLASS_ID_VEHICLE], obj_counter[PGIE_CLASS_ID_PERSON])
+
+        # Now set the offsets where the string should appear
+        py_nvosd_text_params.x_offset = 10
+        py_nvosd_text_params.y_offset = 12
+
+        # Font , font-color and font-size
+        py_nvosd_text_params.font_params.font_name = "Serif"
+        py_nvosd_text_params.font_params.font_size = 10
+        # set(red, green, blue, alpha); set to White
+        py_nvosd_text_params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+
+        # Text background color
+        py_nvosd_text_params.set_bg_clr = 1
+        # set(red, green, blue, alpha); set to Black
+        py_nvosd_text_params.text_bg_clr.set(0.0, 0.0, 0.0, 1.0)
+        # Using pyds.get_string() to get display_text as string
+        print(pyds.get_string(py_nvosd_text_params.display_text))
+        pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+        try:
+            l_frame=l_frame.next
+        except StopIteration:
+            break
+
+    return Gst.PadProbeReturn.OK
+
 
 def cb_newpad(decodebin, decoder_src_pad, data):
     print("In cb_newpad\n")
@@ -187,14 +303,17 @@ def main(args):
     pgie.set_property("customlib-name", "./libcustomlib_videoimpl.so")
     pgie.set_property("customlib-props", "key1:value1")
     pgie.set_property("customlib-props", "key2:value2")
-    pgie.set_property("customlib-props", "scale-factor:2")
+    #pgie.set_property("customlib-props", "scale-factor:2")
+    if DS_VERSION_NUMBER >= 6100:
+        pgie.set_property("dummy-meta-insert", 1)
+        pgie.set_property("fill-dummy-batch-meta", 0)
 
     # Create a caps filter
     caps_postpgie = Gst.ElementFactory.make("capsfilter", "filter_postpgie")
     if is_aarch64():
-        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
+        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA, block-linear=false"))
     else:
-        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
+        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA, block-linear=false"))
 
     print("Creating post pgie nvvidconv \n ")
     nvvidconv_postpgie = Gst.ElementFactory.make("nvvideoconvert", "convertor_postpgie")
@@ -304,14 +423,20 @@ def main(args):
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-    #pipeline.print_dot_file(Gst.DebugGraphDetails.ALL, "pipeline")
-    #Gst.debug_bin_to_dot_file_with_ts(pipeline, Gst.DebugGraphDetails.ALL, "pipeline")
-    #GST_DEBUG_BIN_TO_DOT_FILE(pipeline, GST_DEBUG_GRAPH_SHOW_ALL, "pipeline")
+
+    # Lets add probe to get informed of the meta data generated, we add probe to
+    # the sink pad of the osd element, since by that time, the buffer would have
+    # had got all the metadata.
+    osdsinkpad = nvosd.get_static_pad("sink")
+    if not osdsinkpad:
+        sys.stderr.write(" Unable to get sink pad of nvosd \n")
+
+    osdsinkpad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
+
 
     # start play back and listen to events
     print("Starting pipeline \n")
     pipeline.set_state(Gst.State.PLAYING)
-
 
     try:
         loop.run()
@@ -366,6 +491,7 @@ def parse_args():
     return stream_path
 
 if __name__ == '__main__':
+    parse_ds_version()
     stream_path = parse_args()
     print("Stream path ", stream_path)
     sys.exit(main(stream_path))
