@@ -348,6 +348,8 @@ public:
             sample::gLogError << "create surface failed!" << std::endl;
         }
         NvBufSurfaceMemSet(m_scratchSurface, 0, 1, 128);
+        m_postprocessScratchSize = 0;
+        m_postprocessScratch = nullptr;
     }
 
 #if 0 //defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
@@ -785,23 +787,28 @@ public:
 
     void updateReference(const int& frameIndex, const cv::Mat& mask)
     {
-        cv::Mat mask8u;
+        cv::Mat mask8u, invMask8u;
         if (mask.type() == CV_8UC1) {
             mask8u = mask;
         } else {
             mask.convertTo(mask8u, CV_8UC1);
         }
+        invMask8u = cv::Mat(mask8u.size(), mask8u.type(), 255);
+        invMask8u = invMask8u - mask8u;
         cv::cuda::GpuMat maskGpu(mask8u);
+        cv::cuda::GpuMat invMaskGpu(invMask8u);
 
         const auto numJobs = m_trtJobs.size();
         const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
         const auto jobIndex = frameIndex / networkInputBatchSize;
         const auto batchIndex = frameIndex % networkInputBatchSize;
-        const auto& j = m_trtJobs[jobIndex];
+        auto& j = m_trtJobs[jobIndex];
         //for (const auto& j: m_trtJobs) {
-            nppSetStream(j.stream);
-            NppStreamContext nppStreamCtx;
-            nppGetStreamContext(&nppStreamCtx);
+            if (j.nppcontext.hStream == nullptr) {
+                nppSetStream(j.stream);
+                //NppStreamContext nppStreamCtx;
+                nppGetStreamContext(&(j.nppcontext));
+            }
             const auto batchSize = j.networkInputBatchSize;
             const auto outputSizePerBatch = j.outputbuffers[0].size / batchSize;
             const auto dims = j.inputbuffers[0].dims;
@@ -824,10 +831,14 @@ public:
                     sample::gLogInfo << "update reference " << n << " " << c << " " << H << " " << W << std::endl;
                     const auto reference = reinterpret_cast<float *>(referenceBuffer + (n * C + c) * bufferSizePerChannelInBytes);
                     const auto current = reinterpret_cast<float *>(currentBuffer + (n * C + c) * bufferSizePerChannelInBytes);
-                    NppStatus npp_status = nppiAddWeighted_32f_C1IMR_Ctx(current, W * sizeof(float), maskGpu.data, W, reference, W * sizeof(float), roi, 0.6, nppStreamCtx);
+                    NppStatus npp_status = nppiAddWeighted_32f_C1IMR_Ctx(current, W * sizeof(float), maskGpu.data, W, reference, W * sizeof(float), roi, 0.3, j.nppcontext);
                     if (npp_status != NPP_NO_ERROR)
                     {
-                        sample::gLogError << "update reference npp error " << npp_status << std::endl;
+                        sample::gLogError << "update reference change part npp error " << npp_status << std::endl;
+                    }
+                    npp_status = nppiAddWeighted_32f_C1IMR_Ctx(current, W * sizeof(float), invMaskGpu.data, W, reference, W * sizeof(float), roi, 0.5, j.nppcontext);
+                    if (npp_status != NPP_NO_ERROR) {
+                        sample::gLogError << "update reference steady pard npp error " << npp_status << std::endl;
                     }
                 }
             //}
@@ -859,13 +870,34 @@ public:
             const auto bufferSize = outputSizePerBatch / dims.d[1];
             const auto output0 = outputBuffer;
             const auto output1 = outputBuffer + bufferSize;
-            cv::cuda::GpuMat output1GpuMat(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1), output1);
-            cv::Mat output1CpuMat(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1));
-            CHECK_CUDA(cudaMemcpyAsync(output1CpuMat.data, output1, bufferSize, cudaMemcpyDeviceToHost, m_trtJobs[jobIndex].stream));
-            CHECK_CUDA(cudaStreamSynchronize(m_trtJobs[jobIndex].stream));
-            cv::Mat cpuMask(dims.d[2], dims.d[3], CV_8UC1);
-            cv::threshold(output1CpuMat, output1CpuMat, 0, 255, cv::THRESH_BINARY);
-            output1CpuMat.convertTo(cpuMask, CV_8UC1);
+            if (m_postprocessScratchSize > 0 && m_postprocessScratchSize != bufferSize) {
+                assert(m_postprocessScratch != nullptr);
+                CHECK_CUDA(cudaFree(m_postprocessScratch));
+                m_postprocessScratch = nullptr;
+            }
+            if (m_postprocessScratch == nullptr) {
+                CHECK_CUDA(cudaMalloc(&m_postprocessScratch, bufferSize));
+            }
+            if (m_trtJobs[jobIndex].nppcontext.hStream == nullptr) {
+                nppSetStream(m_trtJobs[jobIndex].stream);
+                nppGetStreamContext(&m_trtJobs[jobIndex].nppcontext);
+            }
+            NppiSize npp_size;
+            npp_size.width = dims.d[3];
+            npp_size.height = dims.d[2];
+            const auto step = npp_size.width * sizeof(float);
+            NppStatus npp_status = nppiSub_32s_C1R_Ctx((Npp32s *)output1, step, (Npp32s *)output0, step, (Npp32s *)m_postprocessScratch, step, npp_size, m_trtJobs[jobIndex].nppcontext);
+            if (npp_status != NPP_NO_ERROR) {
+                sample::gLogError << "npp output1 - output0 error: " << npp_status << std::endl;
+            }
+            cv::cuda::GpuMat gpuMask(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1), m_postprocessScratch);
+            cv::Mat cpuMask(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1));
+            gpuMask.download(cpuMask);
+            //CHECK_CUDA(cudaMemcpyAsync(cpuMask.data, output1, bufferSize, cudaMemcpyDeviceToHost, m_trtJobs[jobIndex].stream));
+            //CHECK_CUDA(cudaStreamSynchronize(m_trtJobs[jobIndex].stream));
+            //cv::Mat cpuMask(dims.d[2], dims.d[3], CV_8UC1);
+            cv::threshold(cpuMask, cpuMask, 0, 255, cv::THRESH_BINARY);
+            cpuMask.convertTo(cpuMask, CV_8UC1);
             cv::dilate(cpuMask, cpuMask, cv::Mat());
             std::vector<std::vector<cv::Point>> contours;
             std::vector<cv::Vec4i> hierarchy;
@@ -1014,6 +1046,8 @@ private:
     //   cudaStream_t m_nppStream;
     // NppStreamContext m_nppcontext;
     NvBufSurface *m_scratchSurface;
+    void * m_postprocessScratch;
+    int m_postprocessScratchSize;
     // int m_numBindings;
     // void **m_bindings;
     static std::string const DEF_ENGINE_NAME;
