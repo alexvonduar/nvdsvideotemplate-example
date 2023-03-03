@@ -239,7 +239,7 @@ bool SampleAlgorithm::SetInitParams(DSCustom_CreateParams *params)
 
   printf("pool config batch size %d\n", pool_config.batch_size);
 #if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
-    trt_infer.initialize("float_int8.engine", pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"Placeholder:0"}, {"transpose_1:0"});
+    trt_infer.initialize("agx_int8.engine", pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"input1","input2"}, {"output"});
 #else
     trt_infer.initialize("a2000.engine", pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"input1","input2"}, {"output"});
 #endif

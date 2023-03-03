@@ -99,20 +99,22 @@ static inline cv::Rect findBestRoi(const cv::Rect &srcRoi, const int &srcWidth, 
         if (srcRoi.width * dstHeight > srcRoi.height * dstWidth)
         {
             const int newHeight = srcRoi.width * dstHeight / dstWidth;
-            const auto newTop = srcRoi.y + newHeight < srcHeight ? srcRoi.y : srcHeight - newHeight;
-            result = cv::Rect(srcRoi.x, newTop, srcRoi.width, newHeight);
+            const auto newTop = srcRoi.y + newHeight < srcHeight ? srcRoi.y : srcHeight - newHeight - 1;
+            const auto newLeft = srcRoi.x + srcRoi.width < srcWidth ? srcRoi.x : srcWidth - srcRoi.width - 1;
+            result = cv::Rect(newLeft, newTop, srcRoi.width, newHeight);
         }
         else
         {
             const auto newWidth = srcRoi.height * dstWidth / dstHeight;
-            const auto newLeft = srcRoi.x + newWidth < srcWidth ? srcRoi.x : srcWidth - newWidth;
-            result = cv::Rect(newLeft, srcRoi.y, newWidth, srcRoi.height);
+            const auto newLeft = srcRoi.x + newWidth < srcWidth ? srcRoi.x : srcWidth - newWidth - 1;
+            const auto newTop = srcRoi.y + srcRoi.height < srcHeight ? srcRoi.y : srcHeight - srcRoi.height - 1;
+            result = cv::Rect(newLeft, newTop, newWidth, srcRoi.height);
         }
     }
     else
     {
-        const auto newLeft = srcRoi.x + dstWidth < srcWidth ? srcRoi.x : srcWidth - dstWidth;
-        const auto newTop = srcRoi.y + dstHeight < srcHeight ? srcRoi.y : srcHeight - dstHeight;
+        const auto newLeft = srcRoi.x + dstWidth < srcWidth ? srcRoi.x : srcWidth - dstWidth - 1;
+        const auto newTop = srcRoi.y + dstHeight < srcHeight ? srcRoi.y : srcHeight - dstHeight - 1;
         result = cv::Rect(newLeft, newTop, dstWidth, dstHeight);
     }
     std::cout << "input roi: " << srcRoi << " adjusted roi " << result << std::endl;
@@ -345,6 +347,7 @@ public:
         {
             sample::gLogError << "create surface failed!" << std::endl;
         }
+        NvBufSurfaceMemSet(m_scratchSurface, 0, 1, 128);
     }
 
 #if 0 //defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
@@ -462,13 +465,13 @@ public:
         // assert(surf->numFilled == 1);
         //  FIXME: check gpuid to support multi-gpu
         // assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
-        assert(surf->surfaceList[0].layout == NVBUF_LAYOUT_PITCH);
+        //assert(surf->surfaceList[0].layout == NVBUF_LAYOUT_PITCH);
         assert(m_scratchSurface->surfaceList[0].layout == NVBUF_LAYOUT_PITCH);
         //auto unifiedMem = surf->memType == NVBUF_MEM_CUDA_UNIFIED;
         sample::gLogInfo << "preprocess: input image memory type " << surf->memType << std::endl;
         switch(surf->memType) {
 #if !defined(PLATFORM_TEGRA) or PLATFORM_TEGRA == 0
-        caseNVBUF_MEM_DEFAULT:
+        case NVBUF_MEM_DEFAULT:
 #endif
         case NVBUF_MEM_CUDA_PINNED:
         case NVBUF_MEM_CUDA_DEVICE:
@@ -485,7 +488,7 @@ public:
             break;
         }
 #if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
-        caseNVBUF_MEM_DEFAULT:
+        case NVBUF_MEM_DEFAULT:
 #endif
         case NVBUF_MEM_SURFACE_ARRAY:
         {
@@ -529,14 +532,22 @@ public:
         memset(&transform_params, 0, sizeof(NvBufSurfTransformParams));
         transform_params.transform_flag = NVBUFSURF_TRANSFORM_FILTER | NVBUFSURF_TRANSFORM_CROP_SRC;
         transform_params.transform_flip = NvBufSurfTransform_None;
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+        transform_params.transform_filter = NvBufSurfTransformInter_Default;
+#else
         transform_params.transform_filter = NvBufSurfTransformInter_Algo4;
+#endif
         NvBufSurfTransformRect src_rect;
         src_rect.left = mSrcRect.x, src_rect.top = mSrcRect.y, src_rect.width = mSrcRect.width, src_rect.height = mSrcRect.height;
         NvBufSurfTransformRect dst_rect;
         dst_rect.left = 0, dst_rect.top = 0, dst_rect.width = m_scratchSurface->surfaceList[0].width, dst_rect.height = m_scratchSurface->surfaceList[0].height;
         transform_params.src_rect = &src_rect;
         // transform_params.dst_rect = &dst_rect;
-        NvBufSurfTransform(surf, m_scratchSurface, &transform_params);
+        const auto tstatus = NvBufSurfTransform(surf, m_scratchSurface, &transform_params);
+        if (tstatus != NvBufSurfTransformError_Success) {
+            sample::gLogError << "failed transform: " << tstatus << std::endl;
+            return;
+        }
         DumpNvBufSurface(m_scratchSurface, nullptr, "NVTransform_");
 
         //}
@@ -1048,6 +1059,16 @@ void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_m
         return;
     }
 
+    if (in_surface->memType == NVBUF_MEM_SURFACE_ARRAY) {
+        const auto status = NvBufSurfaceMap(in_surface, -1, -1, NVBUF_MAP_READ);
+        if (status != 0)
+        {
+            sample::gLogError << "Failed to map surface" << std::endl;
+            return;
+        }
+        NvBufSurfaceSyncForCpu(in_surface, -1, -1);
+    }
+
     for (i = 0; i < numFilled; i++)
     {
         if (batch_meta)
@@ -1061,6 +1082,7 @@ void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_m
                             "BS-" + std::to_string(source_id);
 
         input_data = in_surface->surfaceList[i].dataPtr;
+
         // input_size = in_surface->surfaceList[i].dataSize;
 
         switch (in_surface->surfaceList[i].colorFormat)
@@ -1078,7 +1100,11 @@ void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_m
 
             if (tmpBuffer == nullptr)
             {
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+                tmpBuffer = malloc(size);
+#else
                 CHECK_CUDA(cudaMallocHost(&tmpBuffer, size));
+#endif
                 outfile.open(fname, std::ofstream::out);
             }
             else
@@ -1086,12 +1112,19 @@ void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_m
                 outfile.open(fname, std::ofstream::out | std::ofstream::app);
             }
 
-            cudaMemcpy2D(tmpBuffer,
-                            in_surface->surfaceList[i].pitch, input_data, in_surface->surfaceList[i].pitch,
-                            in_surface->surfaceList[i].pitch,
-                            (in_surface->surfaceList[i].height * 3) / 2, cudaMemcpyDeviceToHost);
+            if (in_surface->memType == NVBUF_MEM_SURFACE_ARRAY) {
+                const auto y = (char *)(in_surface->surfaceList[i].mappedAddr.addr[0]);
+                const auto uv = (char *)(in_surface->surfaceList[i].mappedAddr.addr[1]);
+                outfile.write(y, in_surface->surfaceList[i].pitch * in_surface->surfaceList[i].height);
+                outfile.write(uv, in_surface->surfaceList[i].pitch * in_surface->surfaceList[i].height / 2);
+            } else {
+                cudaMemcpy2D(tmpBuffer,
+                                in_surface->surfaceList[i].pitch, input_data, in_surface->surfaceList[i].pitch,
+                                in_surface->surfaceList[i].pitch,
+                                (in_surface->surfaceList[i].height * 3) / 2, cudaMemcpyDeviceToHost);
+                outfile.write(reinterpret_cast<char *>(tmpBuffer), size);
+            }
 
-            outfile.write(reinterpret_cast<char *>(tmpBuffer), size);
             outfile.close();
         }
         break;
@@ -1133,9 +1166,23 @@ void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_m
             break;
         }
     }
+    if (in_surface->memType == NVBUF_MEM_SURFACE_ARRAY) {
+        const int status = NvBufSurfaceUnMap(in_surface, -1, -1);
+        if (status != 0)
+        {
+            sample::gLogError << "Failed to map surface" << std::endl;
+            return;
+        }
+    }
+
     if (tmpBuffer != nullptr)
     {
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+        free(tmpBuffer);
+        tmpBuffer = nullptr;
+#else
         CHECK_CUDA(cudaFreeHost(tmpBuffer));
+#endif
     }
 #endif
 }
