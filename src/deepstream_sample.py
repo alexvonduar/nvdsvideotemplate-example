@@ -423,7 +423,6 @@ def main(args):
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-
     # Lets add probe to get informed of the meta data generated, we add probe to
     # the sink pad of the osd element, since by that time, the buffer would have
     # had got all the metadata.
@@ -432,7 +431,6 @@ def main(args):
         sys.stderr.write(" Unable to get sink pad of nvosd \n")
 
     osdsinkpad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
-
 
     # start play back and listen to events
     print("Starting pipeline \n")
