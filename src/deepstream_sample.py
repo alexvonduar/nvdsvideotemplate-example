@@ -15,7 +15,7 @@ gi.require_version("Gst", "1.0")
 #gi.require_version("GstRtspServer", "1.0")
 from gi.repository import Gst, GLib
 import configparser
-#import pyds
+import pyds
 
 import argparse
 
@@ -63,7 +63,6 @@ def parse_ds_version():
     global DS_VERSION_NUMBER
     DS_VERSION_NUMBER = (DS_VERSION_MAJOR * 1000) + (DS_VERSION_MINOR * 100) + DS_VERSION_PATCH
 
-'''
 def osd_sink_pad_buffer_probe(pad,info,u_data):
     frame_number=0
     num_rects=0
@@ -148,7 +147,7 @@ def osd_sink_pad_buffer_probe(pad,info,u_data):
             break
 
     return Gst.PadProbeReturn.OK
-'''
+
 
 def cb_newpad(decodebin, decoder_src_pad, data):
     print("In cb_newpad\n")
@@ -304,17 +303,17 @@ def main(args):
     pgie.set_property("customlib-name", "./libcustomlib_videoimpl.so")
     pgie.set_property("customlib-props", "key1:value1")
     pgie.set_property("customlib-props", "key2:value2")
-    pgie.set_property("customlib-props", "scale-factor:2")
+    #pgie.set_property("customlib-props", "scale-factor:2")
     if DS_VERSION_NUMBER >= 6100:
         pgie.set_property("dummy-meta-insert", 1)
-        pgie.set_property("fill-dummy-batch-meta", 1)
+        pgie.set_property("fill-dummy-batch-meta", 0)
 
     # Create a caps filter
     caps_postpgie = Gst.ElementFactory.make("capsfilter", "filter_postpgie")
     if is_aarch64():
-        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
+        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA, block-linear=false"))
     else:
-        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12, block-linear=false"))
+        caps_postpgie.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA, block-linear=false"))
 
     print("Creating post pgie nvvidconv \n ")
     nvvidconv_postpgie = Gst.ElementFactory.make("nvvideoconvert", "convertor_postpgie")
@@ -424,7 +423,7 @@ def main(args):
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-    '''
+
     # Lets add probe to get informed of the meta data generated, we add probe to
     # the sink pad of the osd element, since by that time, the buffer would have
     # had got all the metadata.
@@ -433,7 +432,7 @@ def main(args):
         sys.stderr.write(" Unable to get sink pad of nvosd \n")
 
     osdsinkpad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
-    '''
+
 
     # start play back and listen to events
     print("Starting pipeline \n")

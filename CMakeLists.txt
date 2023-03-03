@@ -85,8 +85,9 @@ endif()
 # customer lib
 set(CUSTOMER_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/nvdsvideotemplate)
 set(CUSTOMER_LIB_SRCs   ${CUSTOMER_LIB_DIR}/customlib_impl/customlib_impl.cpp
+                        ${CUSTOMER_LIB_DIR}/common/algorithm/cuda/nv12_to_rgb_kernel.cu
                         ${CUSTOMER_LIB_DIR}/trt/logger.cpp)
-set(CUSTOMER_LIB_INC ${CUSTOMER_LIB_DIR}/includes ${CUSTOMER_LIB_DIR}/trt)
+set(CUSTOMER_LIB_INC ${CUSTOMER_LIB_DIR}/includes ${CUSTOMER_LIB_DIR}/trt ${CUSTOMER_LIB_DIR}/common/algorithm/cuda)
 set(DeepStream_LIBRARIES nvdsgst_helper nvdsgst_meta nvds_meta nvbufsurface nvbufsurftransform nvdsbufferpool)
 add_library(customlib_videoimpl SHARED ${CUSTOMER_LIB_SRCs})
 if(${CMAKE_VERSION} VERSION_LESS 3.13)
@@ -111,7 +112,7 @@ target_link_libraries(customlib_videoimpl   ${CUDA_LIBRARIES}
                                             nvonnxparser
                                             #nvcaffeparser
                                             ${CUDA_nppc_LIBRARY}
-                                            ${CUDA_nppidei_LIBRARY}
+                                            ${CUDA_nppial_LIBRARY}
                                             ${DeepStream_LIBRARIES}
                                             ${GSTREAMER_LIBRARIES}
                                             ${GSTREAMER_BASE_LIBRARIES}
