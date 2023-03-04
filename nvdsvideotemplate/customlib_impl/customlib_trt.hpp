@@ -4,6 +4,7 @@
 #include <string>
 
 #include <opencv2/opencv.hpp>
+#include <opencv2/core/cuda.hpp>
 
 #include "NvInfer.h"
 #include <nppcore.h>
@@ -255,8 +256,8 @@ public:
                 // sample::gLogInfo << "buffer size: " << buffer.size << std::endl;
                 buffer.buffer = nullptr;
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-                buffer.memType = NVBUF_MEM_CUDA_DEVICE;
-                cudaMalloc(&buffer.buffer, buffer.size);
+                buffer.memType = NVBUF_MEM_CUDA_PINNED;
+                cudaMallocManaged(&buffer.buffer, buffer.size, cudaMemAttachGlobal);
 #else
                 buffer.memType = NVBUF_MEM_CUDA_DEVICE;
                 cudaMallocManaged(&buffer.buffer, buffer.size);
@@ -283,8 +284,9 @@ public:
                 // sample::gLogInfo << "buffer size: " << buffer.size << std::endl;
                 buffer.buffer = nullptr;
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-                buffer.memType = NVBUF_MEM_CUDA_DEVICE;
-                cudaMalloc(&buffer.buffer, buffer.size);
+                buffer.memType = NVBUF_MEM_CUDA_PINNED;
+                //cudaMalloc(&buffer.buffer, buffer.size);
+                cudaMallocManaged(&buffer.buffer, buffer.size, cudaMemAttachGlobal);
 #else
                 buffer.memType = NVBUF_MEM_CUDA_UNIFIED;
                 cudaMallocManaged(&buffer.buffer, buffer.size);
@@ -613,8 +615,8 @@ public:
         if (m_firstFrame) {
             m_firstFrame = false;
         }
-        DumpNCHW(&(m_trtJobs[0].inputbuffers[0]), "input_job0_0_");
-        DumpNCHW(&(m_trtJobs[0].inputbuffers[1]), "input_job0_1_");
+        DumpNCHW(&(m_trtJobs[0].inputbuffers[0]), m_trtJobs[0].stream, "input_job0_0_");
+        DumpNCHW(&(m_trtJobs[0].inputbuffers[1]), m_trtJobs[0].stream, "input_job0_1_");
 
         switch (surf->memType)
         {
@@ -859,7 +861,7 @@ public:
             const auto batchIndex = i % networkInputBatchSize;
             const auto networkInputBatchSize = m_trtJobs[jobIndex].networkInputBatchSize;
             const auto outputSizePerBatch = m_trtJobs[jobIndex].outputbuffers[0].size / networkInputBatchSize;
-            DumpNCHW(&(m_trtJobs[jobIndex].outputbuffers[0]), "output_job_" + std::to_string(jobIndex) + "_0_");
+            DumpNCHW(&(m_trtJobs[jobIndex].outputbuffers[0]), m_trtJobs[jobIndex].stream, "output_job_" + std::to_string(jobIndex) + "_0_");
             auto outputBuffer = reinterpret_cast<unsigned char *>(m_trtJobs[jobIndex].outputbuffers[0].buffer) + batchIndex * outputSizePerBatch;
             sample::gLogInfo << "output job " << jobIndex << " batch " \
                 << batchIndex << " buffer " << reinterpret_cast<void *>(outputBuffer) \
@@ -883,10 +885,11 @@ public:
                 nppGetStreamContext(&m_trtJobs[jobIndex].nppcontext);
             }
             NppiSize npp_size;
-            npp_size.width = dims.d[3];
-            npp_size.height = dims.d[2];
+            npp_size.width = 100;//dims.d[3]/2;
+            npp_size.height = 100;//dims.d[2]/2;
             const auto step = npp_size.width * sizeof(float);
-            NppStatus npp_status = nppiSub_32s_C1R_Ctx((Npp32s *)output1, step, (Npp32s *)output0, step, (Npp32s *)m_postprocessScratch, step, npp_size, m_trtJobs[jobIndex].nppcontext);
+            //NppStatus npp_status = nppiSub_32f_C1R_Ctx((Npp32f *)output1, step, (Npp32f *)output0, step, (Npp32f *)m_postprocessScratch, step, npp_size, m_trtJobs[jobIndex].nppcontext);
+            NppStatus npp_status = nppiSub_32f_C1IR((Npp32f *)output1, step, (Npp32f *)output0, step, npp_size);
             if (npp_status != NPP_NO_ERROR) {
                 sample::gLogError << "npp output1 - output0 error: " << npp_status << std::endl;
             }
@@ -1066,7 +1069,7 @@ private:
     // Helper function to dump the nvbufsurface, used for debugging purpose
     void DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_meta, const std::string& prefix = "");
     // Helper function to dump the nchw buffer, used for debugging purpose
-    void DumpNCHW(TRTBuffer *input, const std::string& prefix = "");
+    void DumpNCHW(TRTBuffer *input, const cudaStream_t& stream, const std::string& prefix = "");
 };
 
 const std::string TRTInfer::DEF_ENGINE_NAME = "best_1x1x720x1280.engine"; //"float_int8.engine";
@@ -1221,9 +1224,9 @@ void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_m
 #endif
 }
 
-void TRTInfer::DumpNCHW(TRTBuffer *input, const std::string& prefix)
+void TRTInfer::DumpNCHW(TRTBuffer *input, const cudaStream_t& stream, const std::string& prefix)
 {
-#if !defined(NDEBUG) or NDEBUG == 0
+#if 0//!defined(NDEBUG) or NDEBUG == 0
     std::ofstream outfile;
     void *input_data = nullptr;
     int size = 0;
@@ -1269,15 +1272,27 @@ void TRTInfer::DumpNCHW(TRTBuffer *input, const std::string& prefix)
         tmp += "_unknown";
         break;
     }
-    cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
-    cv::Mat normMat; //{1, size, cv_input_type};
     std::string fname = tmp + ".nchw";
+    cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
+    cv::Mat normMat;
+#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+    CHECK_CUDA(cudaStreamAttachMemAsync(stream, input_data, 0, cudaMemAttachHost));
+    CHECK_CUDA(cudaStreamSynchronize(stream));
+    cv::normalize(gpuMat, normMat, 0, 255, cv::NORM_MINMAX, cv_input_type);
+    CHECK_CUDA(cudaStreamAttachMemAsync(stream, input_data, 0, cudaMemAttachGlobal));
+#else
+    cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
+    //void * tmpBuff = malloc(input->size);
+    //CHECK_CUDA(cudaMemcpy(tmpBuff, input_data, input->size, cudaMemcpyDeviceToHost));
+    normMat = cv::Mat(1, size, cv_input_type, tmpBuff);
     gpuMat.download(normMat);
     cv::normalize(normMat, normMat, 0, 255, cv::NORM_MINMAX, cv_input_type);
+#endif
     normMat.convertTo(normMat, CV_8UC1);
     outfile.open(fname, std::ofstream::out);
     outfile.write((char *)(normMat.ptr()), size);
     outfile.close();
+    //free(tmpBuff);
 #endif
 }
 
