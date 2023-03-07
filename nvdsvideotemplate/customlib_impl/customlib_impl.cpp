@@ -155,6 +155,7 @@ public:
   // Use vooya or simillar player to view NV12 / RGBA video raw frame
   int dump_max_frames = 5;
   TRTInfer trt_infer;
+  std::string m_modelPath;
 };
 
 extern "C" IDSCustomLibrary *CreateCustomAlgoCtx(DSCustom_CreateParams *params);
@@ -238,11 +239,16 @@ bool SampleAlgorithm::SetInitParams(DSCustom_CreateParams *params)
   }
 
   printf("pool config batch size %d\n", pool_config.batch_size);
+  if (m_modelPath.empty())
+  {
 #if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
-    trt_infer.initialize("agx_int8.engine", pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"input1","input2"}, {"output"});
+    m_modelPath = "agx_int8.engine";
 #else
-    trt_infer.initialize("a2000.engine", pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"input1","input2"}, {"output"});
+    m_modelPath = "a2000.engine";
 #endif
+  }
+  printf("model path: %s\n", m_modelPath.c_str());
+  trt_infer.initialize(m_modelPath, pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"input1","input2"}, {"output"});
 
   m_outputThread = new std::thread(&SampleAlgorithm::OutputThread, this);
 
@@ -431,12 +437,15 @@ bool SampleAlgorithm::SetProperty(Property &prop)
           m_scaleFactor = stof(prop.value);
           if (m_scaleFactor == 0 || m_scaleFactor > 20 || m_scaleFactor < 0)
           {
-              throw std::out_of_range ("out of range scale factor");
+            throw std::out_of_range ("out of range scale factor");
           }
       }
       if (prop.key.compare("frame-insert-interval") == 0)
       {
-          m_frameinsertinterval = stod (prop.value);
+        m_frameinsertinterval = stod (prop.value);
+      }
+      if (prop.key.compare("model-path") == 0) {
+        m_modelPath = prop.value;
       }
   }
   catch(std::invalid_argument& e)

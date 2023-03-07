@@ -303,6 +303,7 @@ def main(args):
     pgie.set_property("customlib-name", "./libcustomlib_videoimpl.so")
     pgie.set_property("customlib-props", "key1:value1")
     pgie.set_property("customlib-props", "key2:value2")
+    pgie.set_property("customlib-props", "model-path:"+model_path)
     #pgie.set_property("customlib-props", "scale-factor:2")
     if DS_VERSION_NUMBER >= 6100:
         pgie.set_property("dummy-meta-insert", 1)
@@ -466,6 +467,8 @@ def parse_args():
                         help="Set the tiled output width ", type=int)
     parser.add_argument("-th", "--tiled-height", default=1080,
                         help="Set the tiled output height ", type=int)
+    parser.add_argument("-m", "--model-path", default="",
+                        help="Set the trt model path", type=str)
     # Check input arguments
     if len(sys.argv)==1:
         parser.print_help(sys.stderr)
@@ -479,6 +482,8 @@ def parse_args():
     tiled_output_width = args.tiled_width
     global tiled_output_height
     tiled_output_height = args.tiled_height
+    global model_path
+    model_path = args.model_path
     #global codec
     #global bitrate
     global stream_path
