@@ -983,9 +983,13 @@ public:
             // delete m_scratchSurface;
             m_scratchSurface = nullptr;
         }
+        if (m_postprocessScratch != nullptr) {
+            assert(m_postprocessScratchSize != 0);
+            cudaFree(m_postprocessScratch);
+        }
     }
 
-    TRTInfer() : m_scratchSurface(nullptr), m_firstFrame(true)
+    TRTInfer() : m_scratchSurface(nullptr), m_postprocessScratch(nullptr), m_postprocessScratchSize(0), m_firstFrame(true)
 #if !defined(NDEBUG) or NDEBUG == 0
     , dump_max_frames(1), dump_max_nchw(3)
 #endif
@@ -1053,9 +1057,9 @@ private:
     int m_postprocessScratchSize;
     // int m_numBindings;
     // void **m_bindings;
-    static std::string const DEF_ENGINE_NAME;
-    static std::string const INPUT_LAYER_NAME;
-    static std::string const OUTPUT_LAYER_NAME;
+    //static std::string const DEF_ENGINE_NAME;
+    //static std::string const INPUT_LAYER_NAME;
+    //static std::string const OUTPUT_LAYER_NAME;
     std::vector<cv::Point2i> mRoi;
     cv::Rect mRoiRect;
     cv::Rect mSrcRect;
@@ -1072,9 +1076,9 @@ private:
     void DumpNCHW(TRTBuffer *input, const cudaStream_t& stream, const std::string& prefix = "");
 };
 
-const std::string TRTInfer::DEF_ENGINE_NAME = "best_1x1x720x1280.engine"; //"float_int8.engine";
-const std::string TRTInfer::INPUT_LAYER_NAME = "Placeholder:0";
-const std::string TRTInfer::OUTPUT_LAYER_NAME = "transpose_1:0";
+//const std::string TRTInfer::DEF_ENGINE_NAME = "best_1x1x720x1280.engine"; //"float_int8.engine";
+//const std::string TRTInfer::INPUT_LAYER_NAME = "Placeholder:0";
+//const std::string TRTInfer::OUTPUT_LAYER_NAME = "transpose_1:0";
 
 void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_meta, const std::string& prefix)
 {
