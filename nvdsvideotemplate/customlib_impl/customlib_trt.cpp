@@ -725,26 +725,6 @@ void TRTInfer::trtInference(NvBufSurface *input, NvBufSurface *output)
 
 TRTInfer::~TRTInfer()
 {
-#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
-    /* Destroy EGLImage */
-    if (NvBufSurfaceUnMapEglImage(m_scratchSurface, -1) != 0)
-    {
-        sample::gLogError << "Unable to unmap EGL Image" << std::endl;
-    }
-    for (int i = 0; i < m_scratchSurface->batchSize; ++i) {
-
-        //m_eglFramePtr[i] = nullptr;
-
-        auto status = cuGraphicsUnregisterResource(m_pResource[i]);
-        if (status != CUDA_SUCCESS)
-        {
-            sample::gLogError << "cuGraphicsEGLUnRegisterResource failed: " << status << std::endl;
-        }
-    }
-    delete []m_eglFramePtr;
-    delete []m_pResource;
-#endif
-
     for (auto &j : m_trtJobs)
     {
         if (j.bindings)
@@ -769,6 +749,25 @@ TRTInfer::~TRTInfer()
 
     if (m_scratchSurface)
     {
+#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+        /* Destroy EGLImage */
+        if (NvBufSurfaceUnMapEglImage(m_scratchSurface, -1) != 0)
+        {
+            sample::gLogError << "Unable to unmap EGL Image" << std::endl;
+        }
+        for (int i = 0; i < m_scratchSurface->batchSize; ++i) {
+
+            //m_eglFramePtr[i] = nullptr;
+
+            auto status = cuGraphicsUnregisterResource(m_pResource[i]);
+            if (status != CUDA_SUCCESS)
+            {
+                sample::gLogError << "cuGraphicsEGLUnRegisterResource failed: " << status << std::endl;
+            }
+        }
+        delete []m_eglFramePtr;
+        delete []m_pResource;
+#endif
         NvBufSurfaceDestroy(m_scratchSurface);
         // delete m_scratchSurface;
         m_scratchSurface = nullptr;
