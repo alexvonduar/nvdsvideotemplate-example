@@ -53,7 +53,11 @@ public:
 
     ~TRTInfer();
 
-    TRTInfer() : m_scratchSurface(nullptr), m_firstFrame(true)
+    TRTInfer() : m_scratchSurface(nullptr)
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+    , m_eglFramePtr(nullptr), m_pResource(nullptr)
+#endif
+    , m_firstFrame(true)
 #if !defined(NDEBUG) or NDEBUG == 0
     , dump_max_frames(1), dump_max_nchw(3)
 #endif
@@ -69,6 +73,10 @@ private:
     std::string m_trtModelFile;
     std::vector<TRTJob> m_trtJobs;
     NvBufSurface *m_scratchSurface;
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+    CUeglFrame *m_eglFramePtr;
+    CUgraphicsResource *m_pResource;
+#endif
     std::vector<cv::Point2i> mRoi;
     cv::Rect mRoiRect;
     cv::Rect mSrcRect;

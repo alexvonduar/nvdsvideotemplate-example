@@ -315,6 +315,30 @@ void TRTInfer::initialize(const std::string &trtModelFile, const int &inputBatch
         sample::gLogError << "create surface failed!" << std::endl;
     }
     NvBufSurfaceMemSet(m_scratchSurface, 0, 1, 128);
+#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+    if (NvBufSurfaceMapEglImage(m_scratchSurface, -1) != 0)
+    {
+        sample::gLogError << "Unable to map EGL Image" << std::endl;
+        return;
+    }
+    m_pResource = new CUgraphicsResource[m_scratchSurface->batchSize];
+    m_eglFramePtr = new CUeglFrame[m_scratchSurface->batchSize];
+    CHECK_CUDA(cudaFree(0));
+    for (int i = 0; i < m_scratchSurface->batchSize; ++i) {
+        auto status = cuGraphicsEGLRegisterImage(&m_pResource[i], m_scratchSurface->surfaceList[i].mappedAddr.eglImage, CU_GRAPHICS_MAP_RESOURCE_FLAGS_NONE);
+        if (status != CUDA_SUCCESS)
+        {
+            sample::gLogError << "cuGraphicsEGLRegisterImage failed: " << status << ", cuda process stop" << std::endl;
+            return;
+        }
+
+        status = cuGraphicsResourceGetMappedEglFrame(&m_eglFramePtr[i], m_pResource[i], 0, 0);
+        if (status != CUDA_SUCCESS)
+        {
+            sample::gLogError << "cuGraphicsSubResourceGetMappedArray failed" << std::endl;
+        }
+    }
+#endif
 }
 
 void TRTInfer::preprocessingImage(NvBufSurface *surf)
@@ -405,6 +429,7 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf)
         sample::gLogError << "failed transform: " << tstatus << std::endl;
         return;
     }
+    m_scratchSurface->numFilled = surf->numFilled;
     DumpNvBufSurface(m_scratchSurface, nullptr, "NVTransform_");
 
     //}
@@ -436,8 +461,13 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf)
         assert(h == plane_h);
         assert(p == plane_p);
         // assert(w == p);
+#if defined(PLATFORM_TEGRA) and PLATFORM_TEGRA
+        const auto src_y = m_eglFramePtr[i].frame.pPitch[0];
+        const auto src_uv = m_eglFramePtr[i].frame.pPitch[1];
+#else
         const auto src_y = ((unsigned char *)m_scratchSurface->surfaceList[i].dataPtr) + m_scratchSurface->surfaceList[i].planeParams.offset[0];
         const auto src_uv = ((unsigned char *)m_scratchSurface->surfaceList[i].dataPtr) + m_scratchSurface->surfaceList[i].planeParams.offset[1];
+#endif
         auto dst_y = reinterpret_cast<Npp32f *>(inputBuffer);
 
         // normalize parameters
@@ -695,6 +725,26 @@ void TRTInfer::trtInference(NvBufSurface *input, NvBufSurface *output)
 
 TRTInfer::~TRTInfer()
 {
+#if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
+    /* Destroy EGLImage */
+    if (NvBufSurfaceUnMapEglImage(m_scratchSurface, -1) != 0)
+    {
+        sample::gLogError << "Unable to unmap EGL Image" << std::endl;
+    }
+    for (int i = 0; i < m_scratchSurface->batchSize; ++i) {
+
+        //m_eglFramePtr[i] = nullptr;
+
+        auto status = cuGraphicsUnregisterResource(m_pResource[i]);
+        if (status != CUDA_SUCCESS)
+        {
+            sample::gLogError << "cuGraphicsEGLUnRegisterResource failed: " << status << std::endl;
+        }
+    }
+    delete []m_eglFramePtr;
+    delete []m_pResource;
+#endif
+
     for (auto &j : m_trtJobs)
     {
         if (j.bindings)
