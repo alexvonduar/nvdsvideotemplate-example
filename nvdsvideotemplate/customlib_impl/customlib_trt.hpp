@@ -350,8 +350,6 @@ public:
             sample::gLogError << "create surface failed!" << std::endl;
         }
         NvBufSurfaceMemSet(m_scratchSurface, 0, 1, 128);
-        m_postprocessScratchSize = 0;
-        m_postprocessScratch = nullptr;
     }
 
 #if 0 //defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
@@ -872,32 +870,24 @@ public:
             const auto bufferSize = outputSizePerBatch / dims.d[1];
             const auto output0 = outputBuffer;
             const auto output1 = outputBuffer + bufferSize;
-            if (m_postprocessScratchSize > 0 && m_postprocessScratchSize != bufferSize) {
-                assert(m_postprocessScratch != nullptr);
-                CHECK_CUDA(cudaFree(m_postprocessScratch));
-                m_postprocessScratch = nullptr;
-            }
-            if (m_postprocessScratch == nullptr) {
-                CHECK_CUDA(cudaMalloc(&m_postprocessScratch, bufferSize));
-            }
             if (m_trtJobs[jobIndex].nppcontext.hStream == nullptr) {
                 nppSetStream(m_trtJobs[jobIndex].stream);
                 nppGetStreamContext(&m_trtJobs[jobIndex].nppcontext);
             }
             NppiSize npp_size;
-            npp_size.width = 100;//dims.d[3]/2;
-            npp_size.height = 100;//dims.d[2]/2;
+            npp_size.width = dims.d[3];
+            npp_size.height = dims.d[2];
             const auto step = npp_size.width * sizeof(float);
-            //NppStatus npp_status = nppiSub_32f_C1R_Ctx((Npp32f *)output1, step, (Npp32f *)output0, step, (Npp32f *)m_postprocessScratch, step, npp_size, m_trtJobs[jobIndex].nppcontext);
-            NppStatus npp_status = nppiSub_32f_C1IR((Npp32f *)output1, step, (Npp32f *)output0, step, npp_size);
+            //NppStatus npp_status = nppiSub_32f_C1R_Ctx((Npp32f *)output0, step, (Npp32f *)output1, step, (Npp32f *)m_postprocessScratch, step, npp_size, m_trtJobs[jobIndex].nppcontext);
+            NppStatus npp_status = nppiSub_32f_C1IR_Ctx((Npp32f *)output0, step, (Npp32f *)output1, step, npp_size, m_trtJobs[jobIndex].nppcontext);
             if (npp_status != NPP_NO_ERROR) {
                 sample::gLogError << "npp output1 - output0 error: " << npp_status << std::endl;
             }
-            cv::cuda::GpuMat gpuMask(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1), m_postprocessScratch);
+            cv::cuda::GpuMat gpuMask(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1), output1);
             cv::Mat cpuMask(dims.d[2], dims.d[3], trtDType2cvDType(dataType, 1));
+            CHECK_CUDA(cudaStreamSynchronize(m_trtJobs[jobIndex].stream));
             gpuMask.download(cpuMask);
             //CHECK_CUDA(cudaMemcpyAsync(cpuMask.data, output1, bufferSize, cudaMemcpyDeviceToHost, m_trtJobs[jobIndex].stream));
-            //CHECK_CUDA(cudaStreamSynchronize(m_trtJobs[jobIndex].stream));
             //cv::Mat cpuMask(dims.d[2], dims.d[3], CV_8UC1);
             cv::threshold(cpuMask, cpuMask, 0, 255, cv::THRESH_BINARY);
             cpuMask.convertTo(cpuMask, CV_8UC1);
@@ -983,13 +973,9 @@ public:
             // delete m_scratchSurface;
             m_scratchSurface = nullptr;
         }
-        if (m_postprocessScratch != nullptr) {
-            assert(m_postprocessScratchSize != 0);
-            cudaFree(m_postprocessScratch);
-        }
     }
 
-    TRTInfer() : m_scratchSurface(nullptr), m_postprocessScratch(nullptr), m_postprocessScratchSize(0), m_firstFrame(true)
+    TRTInfer() : m_scratchSurface(nullptr), m_firstFrame(true)
 #if !defined(NDEBUG) or NDEBUG == 0
     , dump_max_frames(1), dump_max_nchw(3)
 #endif
@@ -1053,8 +1039,6 @@ private:
     //   cudaStream_t m_nppStream;
     // NppStreamContext m_nppcontext;
     NvBufSurface *m_scratchSurface;
-    void * m_postprocessScratch;
-    int m_postprocessScratchSize;
     // int m_numBindings;
     // void **m_bindings;
     //static std::string const DEF_ENGINE_NAME;
