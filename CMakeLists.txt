@@ -85,6 +85,7 @@ endif()
 # customer lib
 set(CUSTOMER_LIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/nvdsvideotemplate)
 set(CUSTOMER_LIB_SRCs   ${CUSTOMER_LIB_DIR}/customlib_impl/customlib_impl.cpp
+                        ${CUSTOMER_LIB_DIR}/customlib_impl/customlib_trt.cpp
                         ${CUSTOMER_LIB_DIR}/common/algorithm/cuda/nv12_to_rgb_kernel.cu
                         ${CUSTOMER_LIB_DIR}/trt/logger.cpp)
 set(CUSTOMER_LIB_INC ${CUSTOMER_LIB_DIR}/includes ${CUSTOMER_LIB_DIR}/trt ${CUSTOMER_LIB_DIR}/common/algorithm/cuda)
