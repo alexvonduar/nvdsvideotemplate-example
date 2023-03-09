@@ -43,12 +43,17 @@
 
 #include "nvdscustomlib_base.hpp"
 
+#include "rapidjson/rapidjson.h"
+#include "rapidjson/document.h"
+
 #include "customlib_trt.hpp"
 
 #define FORMAT_NV12 "NV12"
 #define FORMAT_RGBA "RGBA"
 #define FORMAT_I420 "I420"
 #define GST_CAPS_FEATURE_MEMORY_NVMM "memory:NVMM"
+
+static const std::string DEFAULT_ZONE="[[[990,1105],[800,560],[880,560],[1400,1105]]]";
 
 static void update_dummy_meta_data_on_buffer (NvDsBatchMeta *batch_meta);
 void *set_metadata_ptr(void);
@@ -156,6 +161,7 @@ public:
   int dump_max_frames = 5;
   TRTInfer trt_infer;
   std::string m_modelPath;
+  std::string m_zone;
 };
 
 extern "C" IDSCustomLibrary *CreateCustomAlgoCtx(DSCustom_CreateParams *params);
@@ -163,6 +169,34 @@ extern "C" IDSCustomLibrary *CreateCustomAlgoCtx(DSCustom_CreateParams *params);
 extern "C" IDSCustomLibrary *CreateCustomAlgoCtx(DSCustom_CreateParams *params)
 {
   return new SampleAlgorithm();
+}
+
+static std::vector<std::vector<cv::Point>> parse_zones(std::string zone_str)
+{
+  std::vector<std::vector<cv::Point>> zones;
+  rapidjson::Document d;
+  d.Parse(zone_str.c_str());
+  if (d.IsArray())
+  {
+    for (rapidjson::SizeType i = 0; i < d.Size(); i++)
+    {
+      std::vector<cv::Point> zone;
+      if (d[i].IsArray())
+      {
+        for (rapidjson::SizeType j = 0; j < d[i].Size(); j++)
+        {
+          if (d[i][j].IsArray())
+          {
+            int x = d[i][j][0].GetInt();
+            int y = d[i][j][1].GetInt();
+            zone.emplace_back(cv::Point(x, y));
+          }
+        }
+      }
+      zones.emplace_back(zone);
+    }
+  }
+  return zones;
 }
 
 // Set Init Parameters
@@ -248,7 +282,15 @@ bool SampleAlgorithm::SetInitParams(DSCustom_CreateParams *params)
 #endif
   }
   printf("model path: %s\n", m_modelPath.c_str());
-  trt_infer.initialize(m_modelPath, pool_config.batch_size, {{990,1105},{800,560},{880,560},{1400,1105}}, {"input1","input2"}, {"output"});
+  if (m_zone.empty())
+  {
+    printf("zone is empty, set to default example zone %s\n", DEFAULT_ZONE.c_str());
+    m_zone = DEFAULT_ZONE;
+  }
+
+  const auto zones = parse_zones(m_zone);
+
+  trt_infer.initialize(m_modelPath, pool_config.batch_size, zones[0], {"input1","input2"}, {"output"});
 
   m_outputThread = new std::thread(&SampleAlgorithm::OutputThread, this);
 
@@ -446,6 +488,9 @@ bool SampleAlgorithm::SetProperty(Property &prop)
       }
       if (prop.key.compare("model-path") == 0) {
         m_modelPath = prop.value;
+      }
+      if (prop.key.compare("Zone") == 0) {
+        m_zone = prop.value;
       }
   }
   catch(std::invalid_argument& e)

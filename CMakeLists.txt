@@ -2,11 +2,14 @@ cmake_minimum_required(VERSION 3.4.1)
 
 set(CMAKE_BUILD_TYPE "Debug")
 
+
 project(nvdsvideotemplate-demo LANGUAGES CXX CUDA)
 
 #message(STATUS "CMAKE_HOST_SYSTEM_PROCESSOR: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
 
 set(CMAKE_CXX_STANDARD 11)
+
+find_package(RapidJSON REQUIRED PATHS ${CMAKE_CURRENT_LIST_DIR}/3rdparty/rapidjson-1.1.0/lib/cmake/RapidJSON/ NO_DEFAULT_PATH)
 
 # CUDA
 set(CUDA_LIB "/usr/local/cuda/include/lib")
@@ -106,7 +109,12 @@ target_link_options(customlib_videoimpl PUBLIC -Wl,--no-undefined -Wl,-rpath,$(D
 #endif()
 target_link_directories(customlib_videoimpl PUBLIC ${DeepStream_LIB})
 endif()
-target_include_directories(customlib_videoimpl PUBLIC ${CUSTOMER_LIB_INC} ${OpenCV_INCLUDE_DIRS})
+target_include_directories(
+    customlib_videoimpl PUBLIC
+    ${CUSTOMER_LIB_INC}
+    ${OpenCV_INCLUDE_DIRS}
+    ${RAPIDJSON_INCLUDE_DIRS}
+)
 target_link_libraries(customlib_videoimpl   ${CUDA_LIBRARIES}
                                             cuda
                                             nvinfer
