@@ -420,9 +420,10 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf)
 #endif
     NvBufSurfTransformRect src_rect;
     src_rect.left = mSrcRect.x, src_rect.top = mSrcRect.y, src_rect.width = mSrcRect.width, src_rect.height = mSrcRect.height;
+    std::vector<NvBufSurfTransformRect> src_rects(surf->numFilled, src_rect);
     NvBufSurfTransformRect dst_rect;
     dst_rect.left = 0, dst_rect.top = 0, dst_rect.width = m_scratchSurface->surfaceList[0].width, dst_rect.height = m_scratchSurface->surfaceList[0].height;
-    transform_params.src_rect = &src_rect;
+    transform_params.src_rect = &(src_rects[0]);
     // transform_params.dst_rect = &dst_rect;
     const auto tstatus = NvBufSurfTransform(surf, m_scratchSurface, &transform_params);
     if (tstatus != NvBufSurfTransformError_Success) {
@@ -446,7 +447,8 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf)
         const auto batchIndex = i % networkInputBatchSize;
         const auto networkInputBatchSize = m_trtJobs[jobIndex].networkInputBatchSize;
         const auto inputSizePerBatch = m_trtJobs[jobIndex].inputbuffers[0].size / networkInputBatchSize;
-        auto inputBuffer = reinterpret_cast<unsigned char *>(m_trtJobs[jobIndex].inputbuffers[0].buffer) + batchIndex * inputSizePerBatch;
+        const auto offset = batchIndex * inputSizePerBatch;
+        auto inputBuffer = reinterpret_cast<unsigned char *>(m_trtJobs[jobIndex].inputbuffers[0].buffer) + offset;
         sample::gLogInfo << "preprocessing: " << (void *)inputBuffer << std::endl;
         const auto w = m_scratchSurface->surfaceList[i].width;
         const auto h = m_scratchSurface->surfaceList[i].height;
@@ -488,14 +490,17 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf)
             DataType::Float32,
             PixelLayout::NCHW_BGR,
             Interpolation::Bilinear,
-            0.485f * 255, 0.456 * 255, 0.406 * 255, 255.f / 0.229, 255.f / 0.224, 255.f / 0.225,
+            //0.485f * 255, 0.456 * 255, 0.406 * 255, 255.f / 0.229, 255.f / 0.224, 255.f / 0.225,
+            0,0,0,1,1,1,
             m_trtJobs[jobIndex].stream);
         if (m_firstFrame) {
-            assert(m_trtJobs[jobIndex].inputbuffers[1].size == m_trtJobs[jobIndex].inputbuffers[0].size);
-            cudaMemcpyAsync(m_trtJobs[jobIndex].inputbuffers[1].buffer, inputBuffer, m_trtJobs[jobIndex].inputbuffers[0].size, cudaMemcpyDeviceToDevice, m_trtJobs[jobIndex].stream);
         }
     }
     if (m_firstFrame) {
+        for (auto &j : m_trtJobs) {
+            assert(j.inputbuffers[1].size == j.inputbuffers[0].size);
+            cudaMemcpyAsync(j.inputbuffers[1].buffer, j.inputbuffers[0].buffer, j.inputbuffers[0].size, cudaMemcpyDeviceToDevice, j.stream);
+        }
         m_firstFrame = false;
     }
     DumpNCHW(&(m_trtJobs[0].inputbuffers[0]), m_trtJobs[0].stream, "input_job0_0_");
@@ -647,7 +652,7 @@ void TRTInfer::postprocessingImage(NvBufSurface *surf)
             << " size " << outputSizePerBatch << std::endl;
         const auto dims = m_trtJobs[jobIndex].outputbuffers[0].dims;
         const auto dataType = m_trtJobs[jobIndex].outputbuffers[0].dataType;
-        assert(dims.nbDims == 4 and dims.d[0] == 1 and dims.d[1] == 2 and dims.d[2] == 800 and dims.d[3] == 1408);
+        assert(dims.nbDims == 4 and dims.d[0] == surf->batchSize and dims.d[1] == 2 and dims.d[2] == 800 and dims.d[3] == 1408);
         const auto bufferSize = outputSizePerBatch / dims.d[1];
         const auto output0 = outputBuffer;
         const auto output1 = outputBuffer + bufferSize;
@@ -967,7 +972,7 @@ void TRTInfer::DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_m
 
 void TRTInfer::DumpNCHW(TRTBuffer *input, const cudaStream_t& stream, const std::string& prefix)
 {
-#if 0//!defined(NDEBUG) or NDEBUG == 0
+#if !defined(NDEBUG) or NDEBUG == 0
     std::ofstream outfile;
     void *input_data = nullptr;
     int size = 0;
@@ -1022,10 +1027,10 @@ void TRTInfer::DumpNCHW(TRTBuffer *input, const cudaStream_t& stream, const std:
     cv::normalize(gpuMat, normMat, 0, 255, cv::NORM_MINMAX, cv_input_type);
     CHECK_CUDA(cudaStreamAttachMemAsync(stream, input_data, 0, cudaMemAttachGlobal));
 #else
-    cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
+    //cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
     //void * tmpBuff = malloc(input->size);
     //CHECK_CUDA(cudaMemcpy(tmpBuff, input_data, input->size, cudaMemcpyDeviceToHost));
-    normMat = cv::Mat(1, size, cv_input_type, tmpBuff);
+    normMat = cv::Mat(1, size, cv_input_type);
     gpuMat.download(normMat);
     cv::normalize(normMat, normMat, 0, 255, cv::NORM_MINMAX, cv_input_type);
 #endif
