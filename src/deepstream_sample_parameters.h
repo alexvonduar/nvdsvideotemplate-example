@@ -17,6 +17,7 @@ typedef struct _parameters {
     std::string model;
     std::string lib;
     std::vector<std::string> input_urls;
+    bool debug_mode;
 } parameters;
 
 parameters *parse_parameters(int argc, char *argv[]);

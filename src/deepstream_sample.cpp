@@ -434,7 +434,9 @@ int main(int argc, char *argv[])
                             osd_sink_pad_buffer_probe, NULL, NULL);
     gst_object_unref(osd_sink_pad);
 
-    g_object_set(G_OBJECT(elements["sink"].second), "sync", 0, NULL);
+    if (params->debug_mode) {
+        g_object_set(G_OBJECT(elements["sink"].second), "sync", 0, NULL);
+    }
 
     /* we add all elements into the pipeline */
     for (auto & e : elements)

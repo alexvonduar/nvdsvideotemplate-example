@@ -365,6 +365,8 @@ def main(args):
     sink = Gst.ElementFactory.make("nveglglessink", "nveglglessink")
     if not sink:
         sys.stderr.write(" Unable to create display")
+    if debug:
+        sink.set_property("sync", 0)
 
     #streammux.set_property("width", 1920)
     streammux.set_property("width", input_width)
@@ -473,6 +475,8 @@ def parse_args():
                         help="Set the tiled output height ", type=int)
     parser.add_argument("-m", "--model-path", default="",
                         help="Set the trt model path", type=str)
+    parser.add_argument("-d", "--debug", default=False,
+                        help="Set the debug mode", type=bool)
     # Check input arguments
     if len(sys.argv)==1:
         parser.print_help(sys.stderr)
@@ -488,6 +492,8 @@ def parse_args():
     tiled_output_height = args.tiled_height
     global model_path
     model_path = args.model_path
+    global debug
+    debug = args.debug
     #global codec
     #global bitrate
     global stream_path
