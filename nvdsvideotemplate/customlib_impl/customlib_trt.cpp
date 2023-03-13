@@ -341,9 +341,9 @@ void TRTInfer::initialize(const std::string &trtModelFile, const int &inputBatch
 #endif
 }
 
-void TRTInfer::preprocessingImage(NvBufSurface *surf)
+void TRTInfer::preprocessingImage(NvBufSurface *surf, const uint64_t& frame_count, const std::vector<int>& buffer_remap)
 {
-    // assert(surf->numFilled == 1);
+    //assert(surf->numFilled == 2);
     //  FIXME: check gpuid to support multi-gpu
     // assert(surf->memType == NVBUF_MEM_CUDA_UNIFIED);
     //assert(surf->surfaceList[0].layout == NVBUF_LAYOUT_PITCH);
@@ -431,7 +431,7 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf)
         return;
     }
     m_scratchSurface->numFilled = surf->numFilled;
-    DumpNvBufSurface(m_scratchSurface, nullptr, "NVTransform_");
+    DumpNvBufSurface(m_scratchSurface, nullptr, "NVTransform_frame_" + std::to_string(frame_count) + "_");
 
     //}
 
@@ -443,8 +443,9 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf)
     NppStatus npp_status;
     for (int i = 0; i < m_scratchSurface->numFilled; i++)
     {
-        const auto jobIndex = i / networkInputBatchSize;
-        const auto batchIndex = i % networkInputBatchSize;
+        const auto id = buffer_remap[i];
+        const auto jobIndex = id / networkInputBatchSize;
+        const auto batchIndex = id % networkInputBatchSize;
         const auto networkInputBatchSize = m_trtJobs[jobIndex].networkInputBatchSize;
         const auto inputSizePerBatch = m_trtJobs[jobIndex].inputbuffers[0].size / networkInputBatchSize;
         const auto offset = batchIndex * inputSizePerBatch;
@@ -503,8 +504,8 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf)
         }
         m_firstFrame = false;
     }
-    DumpNCHW(&(m_trtJobs[0].inputbuffers[0]), m_trtJobs[0].stream, "input_job0_0_");
-    DumpNCHW(&(m_trtJobs[0].inputbuffers[1]), m_trtJobs[0].stream, "input_job0_1_");
+    DumpNCHW(&(m_trtJobs[0].inputbuffers[0]), m_trtJobs[0].stream, "input_" + std::to_string(frame_count) + "_job[0]_0_");
+    DumpNCHW(&(m_trtJobs[0].inputbuffers[1]), m_trtJobs[0].stream, "input_" + std::to_string(frame_count) + "_job[0]_1_");
 
     switch (surf->memType)
     {
@@ -571,7 +572,7 @@ static inline int trtDType2cvDType(const nvinfer1::DataType& type, const int& ch
     }
 }
 
-void TRTInfer::updateReference(const int& frameIndex, const cv::Mat& mask)
+void TRTInfer::updateReference(const int& jobIndex, const int& batchIndex, const cv::Mat& mask)
 {
     cv::Mat mask8u, invMask8u;
     if (mask.type() == CV_8UC1) {
@@ -584,10 +585,10 @@ void TRTInfer::updateReference(const int& frameIndex, const cv::Mat& mask)
     cv::cuda::GpuMat maskGpu(mask8u);
     cv::cuda::GpuMat invMaskGpu(invMask8u);
 
-    const auto numJobs = m_trtJobs.size();
-    const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
-    const auto jobIndex = frameIndex / networkInputBatchSize;
-    const auto batchIndex = frameIndex % networkInputBatchSize;
+    //const auto numJobs = m_trtJobs.size();
+    //const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
+    //const auto jobIndex = frameIndex / networkInputBatchSize;
+    //const auto batchIndex = frameIndex % networkInputBatchSize;
     auto& j = m_trtJobs[jobIndex];
     //for (const auto& j: m_trtJobs) {
         if (j.nppcontext.hStream == nullptr) {
@@ -631,7 +632,7 @@ void TRTInfer::updateReference(const int& frameIndex, const cv::Mat& mask)
     //}
 }
 
-void TRTInfer::postprocessingImage(NvBufSurface *surf)
+void TRTInfer::postprocessingImage(NvBufSurface *surf, const uint64_t& frame_count, const std::vector<int>& buffer_remap)
 {
     const auto numJobs = m_trtJobs.size();
     const auto networkInputBatchSize = m_trtJobs[0].networkInputBatchSize;
@@ -639,20 +640,22 @@ void TRTInfer::postprocessingImage(NvBufSurface *surf)
     // const auto outputSizePerBatch = m_trtOutputBuffers[0].size / batchSize;
     // auto outputBuffer = reinterpret_cast<unsigned char *>(m_trtOutputBuffers[0].buffer);
     NppStatus npp_status = NPP_NO_ERROR;
-    for (int i = 0; i < surf->numFilled; i++)
+    m_bboxes.clear();
+    for (int id = 0; id < surf->numFilled; id++)
     {
+        const auto i = buffer_remap[id];
         const auto jobIndex = i / networkInputBatchSize;
         const auto batchIndex = i % networkInputBatchSize;
         const auto networkInputBatchSize = m_trtJobs[jobIndex].networkInputBatchSize;
         const auto outputSizePerBatch = m_trtJobs[jobIndex].outputbuffers[0].size / networkInputBatchSize;
-        DumpNCHW(&(m_trtJobs[jobIndex].outputbuffers[0]), m_trtJobs[jobIndex].stream, "output_job_" + std::to_string(jobIndex) + "_0_");
+        DumpNCHW(&(m_trtJobs[jobIndex].outputbuffers[0]), m_trtJobs[jobIndex].stream, "output_"+ std::to_string(frame_count) + "_job_" + std::to_string(jobIndex) + "_0_");
         auto outputBuffer = reinterpret_cast<unsigned char *>(m_trtJobs[jobIndex].outputbuffers[0].buffer) + batchIndex * outputSizePerBatch;
         sample::gLogInfo << "output job " << jobIndex << " batch " \
             << batchIndex << " buffer " << reinterpret_cast<void *>(outputBuffer) \
             << " size " << outputSizePerBatch << std::endl;
         const auto dims = m_trtJobs[jobIndex].outputbuffers[0].dims;
         const auto dataType = m_trtJobs[jobIndex].outputbuffers[0].dataType;
-        assert(dims.nbDims == 4 and dims.d[0] == surf->batchSize and dims.d[1] == 2 and dims.d[2] == 800 and dims.d[3] == 1408);
+        assert(dims.nbDims == 4 /*and dims.d[0] == surf->batchSize*/ and dims.d[1] == 2 and dims.d[2] == 800 and dims.d[3] == 1408);
         const auto bufferSize = outputSizePerBatch / dims.d[1];
         const auto output0 = outputBuffer;
         const auto output1 = outputBuffer + bufferSize;
@@ -681,7 +684,8 @@ void TRTInfer::postprocessingImage(NvBufSurface *surf)
         std::vector<std::vector<cv::Point>> contours;
         std::vector<cv::Vec4i> hierarchy;
         cv::findContours(cpuMask, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-        m_trtJobs[jobIndex].bboxes[batchIndex].clear();
+        //m_trtJobs[jobIndex].bboxes[batchIndex].clear();
+        std::vector<cv::Rect> bboxes;
         if (contours.size()) {
             std::vector<cv::Point> hull;
             //std::vector<std::vector<cv::Point> >hulls;
@@ -695,16 +699,18 @@ void TRTInfer::postprocessingImage(NvBufSurface *surf)
                 rect.y = (rect.y / mScale) + mSrcRect.y;
                 rect.width /= mScale;
                 rect.height /= mScale;
-                m_trtJobs[jobIndex].bboxes[batchIndex].emplace_back(rect);
+                //m_trtJobs[jobIndex].bboxes[batchIndex].emplace_back(rect);
+                bboxes.emplace_back(rect);
             }
         }
-        updateReference(i, cpuMask);
+        m_bboxes.emplace_back(bboxes);
+        updateReference(jobIndex, batchIndex, cpuMask);
     }
 }
 
-void TRTInfer::trtInference(NvBufSurface *input, NvBufSurface *output)
+void TRTInfer::trtInference(NvBufSurface *input, NvBufSurface *output, const uint64_t& frame_count, const std::vector<int>& buffer_remap)
 {
-    preprocessingImage(input);
+    preprocessingImage(input, frame_count, buffer_remap);
     // void *bindings[] = {m_trtInputBuffer, m_trtOutputBuffer};
     //  auto context = m_trtengine->getExecutionContext();
     //  cudaStream_t stream;
@@ -720,7 +726,7 @@ void TRTInfer::trtInference(NvBufSurface *input, NvBufSurface *output)
             sample::gLogError << "Failed to do " << i << " infer job" << std::endl;
         }
     }
-    postprocessingImage(output);
+    postprocessingImage(output, frame_count, buffer_remap);
 
     for (const auto &j : m_trtJobs)
     {
@@ -779,24 +785,45 @@ TRTInfer::~TRTInfer()
     }
 }
 
-void TRTInfer::fillBatchMetaData (NvDsBatchMeta *batch_meta, const int& numFilled)
+void TRTInfer::fillBatchMetaData (NvDsBatchMeta *batch_meta, const std::unordered_map<int,int>& source_id_to_stream_id)
 {
     if (batch_meta == nullptr)
     {
         return;
     }
+    const auto numFilled = source_id_to_stream_id.size();
+    //assert(numFilled == batch_meta->frame_meta_list->num_elements);
     NvDsMetaList * l_frame = NULL;
-    for (int i = 0; i < numFilled; i ++)
-    //for (l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next)
+    //for (int i = 0; i < numFilled; i ++)
+    int frame_index = 0;
+    for (l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next)
     {
-        NvDsFrameMeta *frame_meta = nvds_get_nth_frame_meta(batch_meta->frame_meta_list, i);
-        //NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
+        //const auto id = source_id[i];
+        //NvDsFrameMetaList * l_frame = nullptr;
+        //for (l_frame = batch_meta->frame_meta_list; l_frame != nullptr; l_frame = l_frame->next)
+        //{
+        //    NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
+        //    if (frame_meta->source_id == id)
+        //    {
+        //        break;
+        //    }
+        //}
+        //if (l_frame == nullptr)
+        //{
+        //    sample::gLogError << "source id: " << id << " not found in meta data" << std::endl;
+        //    continue;
+        //}
+        //NvDsFrameMeta *frame_meta = nvds_get_nth_frame_meta(batch_meta->frame_meta_list, i);
+        NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
+        const auto i = source_id_to_stream_id.find(frame_meta->source_id)->second;
+        sample::gLogInfo << "frame index: " << i << " pad idx: " << frame_meta->pad_index << " source id: " << frame_meta->source_id << std::endl;
         /*printf ("pad_index = %d frame_width = %d frame_height = %d\n",
                 frame_meta->pad_index, frame_meta->source_frame_width, frame_meta->source_frame_height);*/
         const auto inputBatchSize = m_trtJobs[0].networkInputBatchSize;
         const auto jobIndex = i / inputBatchSize;
         const auto batchIndex = i % inputBatchSize;
-        for (const auto& b : m_trtJobs[jobIndex].bboxes[batchIndex])
+        //for (const auto& b : m_trtJobs[jobIndex].bboxes[batchIndex])
+        for (const auto& b : m_bboxes[frame_index])
         {
             NvDsObjectMeta *obj_meta = nvds_acquire_obj_meta_from_pool (batch_meta);
             obj_meta->unique_component_id = 0xAB;
@@ -819,6 +846,7 @@ void TRTInfer::fillBatchMetaData (NvDsBatchMeta *batch_meta, const int& numFille
 
             nvds_add_obj_meta_to_frame (frame_meta, obj_meta, NULL);
         }
+        frame_index++;
     }
 }
 
@@ -1031,10 +1059,20 @@ void TRTInfer::DumpNCHW(TRTBuffer *input, const cudaStream_t& stream, const std:
     //void * tmpBuff = malloc(input->size);
     //CHECK_CUDA(cudaMemcpy(tmpBuff, input_data, input->size, cudaMemcpyDeviceToHost));
     normMat = cv::Mat(1, size, cv_input_type);
+    CHECK_CUDA(cudaStreamSynchronize(stream));
     gpuMat.download(normMat);
     cv::normalize(normMat, normMat, 0, 255, cv::NORM_MINMAX, cv_input_type);
 #endif
     normMat.convertTo(normMat, CV_8UC1);
+#if 0
+    //cv::namedWindow(fname);
+    const int width = 1408;
+    const int height = 800*3;
+    assert(size == width*height);
+    cv::Mat img(height, width, CV_8UC1, normMat.ptr());
+    cv::imshow(fname, img);
+    //cv::waitKey(0);
+#endif
     outfile.open(fname, std::ofstream::out);
     outfile.write((char *)(normMat.ptr()), size);
     outfile.close();

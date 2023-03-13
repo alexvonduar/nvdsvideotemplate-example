@@ -404,6 +404,7 @@ def main(args):
     cap_postmux.link(pgie)
     pgie.link(caps_postpgie)
     caps_postpgie.link(nvvidconv_postpgie)
+    #nvvidconv_postpgie.link(nvosd)
     if number_sources > 1:
         nvvidconv_postpgie.link(tiler)
         tiler.link(nvosd)
@@ -428,7 +429,10 @@ def main(args):
     # Lets add probe to get informed of the meta data generated, we add probe to
     # the sink pad of the osd element, since by that time, the buffer would have
     # had got all the metadata.
-    osdsinkpad = nvosd.get_static_pad("sink")
+    if number_sources > 1:
+        osdsinkpad = tiler.get_static_pad("sink")
+    else:
+        osdsinkpad = nvosd.get_static_pad("sink")
     if not osdsinkpad:
         sys.stderr.write(" Unable to get sink pad of nvosd \n")
 

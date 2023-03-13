@@ -23,7 +23,8 @@
 #include <iostream>
 #include <fstream>
 #include <thread>
-#include <string.h>
+#include <string>
+#include <unordered_map>
 #include <queue>
 #include <mutex>
 #include <stdexcept>
@@ -60,6 +61,7 @@ void *set_metadata_ptr(void);
 static gpointer copy_user_meta(gpointer data, gpointer user_data);
 static void release_user_meta(gpointer data, gpointer user_data);
 void fill_dummy_batch_meta_on_buffer (NvDsBatchMeta *batch_meta);
+static void fill_source_id(NvDsBatchMeta *batch_meta, std::vector<int> &source_id, std::unordered_map<int, int>& source_id_job_map, std::vector<int>& buffer_remap);
 
 inline bool CHECK_(int e, int iLine, const char *szFile) {
     if (e != cudaSuccess) {
@@ -134,6 +136,7 @@ public:
   guint m_frameinsertinterval = 0;
   bool m_transformMode = false;
   bool outputthread_stopped = false;
+  bool m_force_process = false;
 
   /* Custom Library Bufferpool */
   GstBufferPool *m_dsBufferPool = NULL;
@@ -492,6 +495,9 @@ bool SampleAlgorithm::SetProperty(Property &prop)
       if (prop.key.compare("Zone") == 0) {
         m_zone = prop.value;
       }
+      if (prop.key.compare("force") == 0) {
+        m_force_process = (stoi(prop.value) > 0);
+      }
   }
   catch(std::invalid_argument& e)
   {
@@ -724,12 +730,13 @@ static void release_user_meta(gpointer data, gpointer user_data)
 void fill_dummy_batch_meta_on_buffer (NvDsBatchMeta *batch_meta)
 {
     NvDsMetaList * l_frame = NULL;
+    int count = 0;
     for (l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next)
     {
         NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
         /*printf ("pad_index = %d frame_width = %d frame_height = %d\n",
                 frame_meta->pad_index, frame_meta->source_frame_width, frame_meta->source_frame_height);*/
-        for (int i = 0; i < NUM_OBJECTS; i ++)
+        for (int i = 0; i < (NUM_OBJECTS + count); i ++)
         {
             NvDsObjectMeta *obj_meta = nvds_acquire_obj_meta_from_pool (batch_meta);
             obj_meta->unique_component_id = 0xAB;
@@ -752,7 +759,53 @@ void fill_dummy_batch_meta_on_buffer (NvDsBatchMeta *batch_meta)
 
             nvds_add_obj_meta_to_frame (frame_meta, obj_meta, NULL);
         }
+        count += 10;
     }
+}
+
+void fill_source_id (NvDsBatchMeta *batch_meta, std::vector<int> &source_id, std::unordered_map<int, int>& source_id_job_map, std::vector<int> &buffer_remap)
+{
+  source_id.clear();
+  NvDsMetaList * l_frame = NULL;
+  //printf("input frame id: ");
+  for (l_frame = batch_meta->frame_meta_list; l_frame != NULL; l_frame = l_frame->next)
+  {
+    NvDsFrameMeta *frame_meta = (NvDsFrameMeta *) (l_frame->data);
+    source_id.emplace_back(frame_meta->source_id);
+    //frame_meta->source_id = source_id;
+    //printf("%d ", frame_meta->source_id);
+  }
+  //printf("\n");
+  if (source_id_job_map.size() == 0)
+  {
+    for (int i = 0; i < source_id.size(); i++)
+    {
+      source_id_job_map[source_id[i]] = i;
+    }
+#if 0
+    // Helper lambda function to print key-value pairs
+    auto print_key_value = [](const auto& key, const auto& value)
+    {
+        std::cout << " Key:[" << key << "] Value:[" << value << "] ";
+    };
+    std::cout << "input frame source id job: ";
+    for( const auto& n : source_id_job_map )
+      print_key_value(n.first, n.second);
+    std::cout << std::endl;
+#endif
+  }
+  assert(source_id.size() <= source_id_job_map.size());
+  buffer_remap.clear();
+  for (int i = 0; i < source_id.size(); i++)
+  {
+    buffer_remap.emplace_back(source_id_job_map[source_id[i]]);
+  }
+  assert(buffer_remap.size() == source_id.size());
+  //printf("input frame id: ");
+  for (int i = 0; i < source_id.size(); i++)
+  {
+    printf("input frame stream: %d source id %d send to %d\n", i, source_id[i], buffer_remap[i]);
+  }
 }
 
 void update_dummy_meta_data_on_buffer (NvDsBatchMeta *batch_meta)
@@ -783,6 +836,7 @@ void update_dummy_meta_data_on_buffer (NvDsBatchMeta *batch_meta)
 
 static inline void print_buf_surface(NvBufSurface *surf)
 {
+#if (not defined(NDEBUG)) or NDEBUG == 0
   g_print("surface: gpu %d mem type %d cont %d b/f %d[%d]\n", surf->gpuId, surf->memType, surf->isContiguous, surf->batchSize, surf->numFilled);
   // Enable below code to copy the frame, else it will insert GREEN frame
   for (int i = 0; i < surf->numFilled; ++i) {
@@ -803,6 +857,7 @@ static inline void print_buf_surface(NvBufSurface *surf)
                               surf->surfaceList[i].mappedAddr.addr[j]);
     }
   }
+#endif
 }
 
 /* Output Processing Thread */
@@ -820,6 +875,10 @@ void SampleAlgorithm::OutputThread(void)
       return;
     }
   }
+  std::vector<int> source_id;
+  std::unordered_map<int, int> source_id_job_map;
+  std::vector<int> buffer_remap;
+  uint64_t frame_count = 0;
 
   /* Run till signalled to stop. */
   while (1) {
@@ -835,7 +894,7 @@ void SampleAlgorithm::OutputThread(void)
 
     PacketInfo packetInfo = m_processQ.front();
     m_processQ.pop();
-    printf("OutputThread: frame_num %d queue size %d\n", packetInfo.frame_num, m_processQ.size());
+    printf("OutputThread: frame_num %d queue size %ld\n", packetInfo.frame_num, m_processQ.size());
 
     m_processCV.notify_all();
     lk.unlock();
@@ -854,7 +913,7 @@ void SampleAlgorithm::OutputThread(void)
         }
     }
 
-    if (m_transformMode) {
+    if (m_transformMode or m_force_process) {
         if (hw_caps == true)
         {
             // set surface transform session when transform mode is on
@@ -903,6 +962,8 @@ void SampleAlgorithm::OutputThread(void)
               fill_dummy_batch_meta_on_buffer (batch_meta);
             }
 #endif
+            fill_source_id (batch_meta, source_id, source_id_job_map, buffer_remap);
+            assert(source_id.size() == in_surf->numFilled);
 
             out_surf->numFilled = in_surf->numFilled;
             // Enable below code to copy the frame, else it will insert GREEN frame
@@ -915,8 +976,8 @@ void SampleAlgorithm::OutputThread(void)
                 transform_params.transform_filter = NvBufSurfTransformInter_Default;
 
                 NvBufSurfTransform (in_surf, out_surf, &transform_params);
-                trt_infer.trtInference(in_surf, out_surf);
-                trt_infer.fillBatchMetaData(batch_meta, in_surf->numFilled);
+                trt_infer.trtInference(in_surf, out_surf, frame_count, buffer_remap);
+                trt_infer.fillBatchMetaData(batch_meta, source_id_job_map);
             }
 
             outSurf = out_surf;
@@ -998,6 +1059,7 @@ void SampleAlgorithm::OutputThread(void)
     GST_DEBUG_OBJECT (m_element, "CustomLib: %s in_surf=%p, Pushing Frame %d to downstream... flow_ret = %d TS=%" GST_TIME_FORMAT " \n",
             __func__, in_surf, packetInfo.frame_num, flow_ret, GST_TIME_ARGS(GST_BUFFER_PTS(outBuffer)));
 
+    frame_count++;
     lk.lock();
     continue;
   }

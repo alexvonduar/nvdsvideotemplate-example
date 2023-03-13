@@ -44,12 +44,12 @@ class TRTInfer
 public:
     void initialize(const std::string &trtModelFile, const int &inputBatch, const std::vector<cv::Point2i> roi, const std::vector<std::string> &inputNames, const std::vector<std::string> &outputNames);
 
-    void preprocessingImage(NvBufSurface *surf);
+    void preprocessingImage(NvBufSurface *surf, const uint64_t& frame_count, const std::vector<int>& buffer_remap);
 
 
-    void postprocessingImage(NvBufSurface *surf);
+    void postprocessingImage(NvBufSurface *surf, const uint64_t& frame_count, const std::vector<int>& buffer_remap);
 
-    void trtInference(NvBufSurface *input, NvBufSurface *output);
+    void trtInference(NvBufSurface *input, NvBufSurface *output, const uint64_t& frame_count, const std::vector<int>& buffer_remap);
 
     ~TRTInfer();
 
@@ -64,10 +64,10 @@ public:
     {
     }
 
-    void fillBatchMetaData (NvDsBatchMeta *batch_meta, const int& numFilled);
+    void fillBatchMetaData (NvDsBatchMeta *batch_meta, const std::unordered_map<int,int>& source_id);
 
 private:
-    void updateReference(const int& frameIndex, const cv::Mat& mask);
+    void updateReference(const int& jobIndex, const int& batchIndex, const cv::Mat& mask);
     std::unique_ptr<nvinfer1::IRuntime> m_trtruntime;
     std::shared_ptr<nvinfer1::ICudaEngine> m_trtengine;
     std::string m_trtModelFile;
@@ -86,6 +86,7 @@ private:
     int dump_max_frames;
     int dump_max_nchw;
 #endif
+    std::vector<std::vector<cv::Rect>> m_bboxes;
 
     // Helper function to dump the nvbufsurface, used for debugging purpose
     void DumpNvBufSurface(NvBufSurface *in_surface, NvDsBatchMeta *batch_meta, const std::string& prefix = "");
