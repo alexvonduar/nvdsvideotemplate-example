@@ -7,13 +7,15 @@ project(nvdsvideotemplate-demo LANGUAGES CXX CUDA)
 
 #message(STATUS "CMAKE_HOST_SYSTEM_PROCESSOR: ${CMAKE_HOST_SYSTEM_PROCESSOR}")
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
 find_package(RapidJSON REQUIRED PATHS ${CMAKE_CURRENT_LIST_DIR}/3rdparty/rapidjson-1.1.0/lib/cmake/RapidJSON/ NO_DEFAULT_PATH)
 
+set(CUDA_VER "11.8")
+
 # CUDA
-set(CUDA_LIB "/usr/local/cuda/include/lib")
-set(CUDA_INC "/usr/local/cuda/include")
+set(CUDA_LIB "/usr/local/cuda-${CUDA_VER}/lib64")
+set(CUDA_INC "/usr/local/cuda-${CUDA_VER}/include")
 find_package(CUDA REQUIRED)
 
 # cudnn
@@ -165,4 +167,26 @@ add_custom_target(python_samples
 add_custom_command(
     TARGET python_samples
     COMMAND cp ${PYTHON_SOURCES} ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+add_executable(
+    deepstream_sample
+    ${CMAKE_CURRENT_LIST_DIR}/src/deepstream_sample.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/src/deepstream_sample_parameters.cpp
+)
+target_link_directories(deepstream_sample PUBLIC ${DeepStream_LIB})
+target_link_libraries(deepstream_sample
+    ${CUDA_LIBRARIES}
+    cuda
+    #nvinfer
+    #nvonnxparser
+    #nvcaffeparser
+    #${CUDA_nppc_LIBRARY}
+    #${CUDA_nppial_LIBRARY}
+    ${GSTREAMER_LIBRARIES}
+    #${GSTREAMER_BASE_LIBRARIES}
+    #${GSTREAMER_VIDEO_LIBRARIES}
+    ${DeepStream_LIBRARIES}
+    #${OpenCV_LIBS}
+    #${TORCH_LIBRARIES}
 )
