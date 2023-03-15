@@ -492,7 +492,7 @@ void TRTInfer::preprocessingImage(NvBufSurface *surf, const uint64_t& frame_coun
             PixelLayout::NCHW_BGR,
             Interpolation::Bilinear,
             //0.485f * 255, 0.456 * 255, 0.406 * 255, 255.f / 0.229, 255.f / 0.224, 255.f / 0.225,
-            0,0,0,1,1,1,
+            128,128,128,1.0/128,1.0/128,1.0/128,
             m_trtJobs[jobIndex].stream);
         if (m_firstFrame) {
         }

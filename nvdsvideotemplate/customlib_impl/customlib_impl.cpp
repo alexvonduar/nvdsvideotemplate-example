@@ -293,7 +293,7 @@ bool SampleAlgorithm::SetInitParams(DSCustom_CreateParams *params)
 
   const auto zones = parse_zones(m_zone);
 
-  trt_infer.initialize(m_modelPath, pool_config.batch_size, zones[0], {"input1","input2"}, {"output"});
+  trt_infer.initialize(m_modelPath, pool_config.batch_size, zones[0], {"input1","input2"}, {"406"});
 
   m_outputThread = new std::thread(&SampleAlgorithm::OutputThread, this);
 
