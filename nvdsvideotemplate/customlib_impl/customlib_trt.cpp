@@ -1047,15 +1047,15 @@ void TRTInfer::DumpNCHW(TRTBuffer *input, const cudaStream_t& stream, const std:
         break;
     }
     std::string fname = tmp + ".nchw";
-    cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
     cv::Mat normMat;
 #if defined(PLATFORM_TEGRA) && PLATFORM_TEGRA
     CHECK_CUDA(cudaStreamAttachMemAsync(stream, input_data, 0, cudaMemAttachHost));
     CHECK_CUDA(cudaStreamSynchronize(stream));
+    cv::Mat gpuMat{1, size, cv_input_type, input_data};
     cv::normalize(gpuMat, normMat, 0, 255, cv::NORM_MINMAX, cv_input_type);
     CHECK_CUDA(cudaStreamAttachMemAsync(stream, input_data, 0, cudaMemAttachGlobal));
 #else
-    //cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
+    cv::cuda::GpuMat gpuMat{1, size, cv_input_type, input_data};
     //void * tmpBuff = malloc(input->size);
     //CHECK_CUDA(cudaMemcpy(tmpBuff, input_data, input->size, cudaMemcpyDeviceToHost));
     normMat = cv::Mat(1, size, cv_input_type);
