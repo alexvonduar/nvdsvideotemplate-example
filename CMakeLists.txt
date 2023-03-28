@@ -9,9 +9,22 @@ project(nvdsvideotemplate-demo LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 
-find_package(RapidJSON REQUIRED PATHS ${CMAKE_CURRENT_LIST_DIR}/3rdparty/rapidjson-1.1.0/lib/cmake/RapidJSON/ NO_DEFAULT_PATH)
 
+if (DEFINED CUDA_VER)
+message(STATUS "use CUDA_VER=${CUDA_VER}")
+else()
+message(WARNING "CUDA_VER not defined, use 11.8 as default")
 set(CUDA_VER "11.8")
+endif()
+
+if (NOT DEFINED OpenCV_DIR)
+message(WARNING "OpenCV dir not defined, use system default OpenCV which may not have CUDA implementation")
+endif()
+
+
+set(RAPIDJSON_INCLUDE_DIRS ${CMAKE_CURRENT_LIST_DIR}/3rdparty/rapidjson-1.1.0/include)
+#find_package(RapidJSON REQUIRED NO_DEFAULT_PATH)
+
 
 # CUDA
 set(CUDA_LIB "/usr/local/cuda-${CUDA_VER}/lib64")
