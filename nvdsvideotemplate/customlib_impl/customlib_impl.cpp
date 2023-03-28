@@ -879,6 +879,9 @@ void SampleAlgorithm::OutputThread(void)
   std::unordered_map<int, int> source_id_job_map;
   std::vector<int> buffer_remap;
   uint64_t frame_count = 0;
+  int64_t max_infer_time = 0;
+  int64_t min_infer_time = 0;
+  int64_t total_infer_time = 0;
 
   /* Run till signalled to stop. */
   while (1) {
@@ -976,8 +979,21 @@ void SampleAlgorithm::OutputThread(void)
                 transform_params.transform_filter = NvBufSurfTransformInter_Default;
 
                 NvBufSurfTransform (in_surf, out_surf, &transform_params);
+                const auto start = std::chrono::high_resolution_clock::now();
                 trt_infer.trtInference(in_surf, out_surf, frame_count, buffer_remap);
                 trt_infer.fillBatchMetaData(batch_meta, source_id_job_map);
+                const auto stop = std::chrono::high_resolution_clock::now();
+                const auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count();
+                if (frame_count == 0) {
+                  min_infer_time = elapsed_us;
+                  max_infer_time = elapsed_us;
+                } else {
+                  min_infer_time = elapsed_us < min_infer_time ? elapsed_us : min_infer_time;
+                  max_infer_time = elapsed_us > max_infer_time ? elapsed_us : max_infer_time;
+                }
+                total_infer_time += elapsed_us;
+                const auto avg_infer_time = float(total_infer_time) / frame_count;
+                printf("inference time: min %f ms max %f ms avg %f ms %f fps\n", min_infer_time/1000., max_infer_time/1000., avg_infer_time/1000, 1000000./avg_infer_time);
             }
 
             outSurf = out_surf;
